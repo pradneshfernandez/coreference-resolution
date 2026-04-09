@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.installed.cfg
+pip-selfcheck.json
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Data (large — do not commit)
+transmucores_data/
+processed_data/
+inference_output/
+model_output/
+
+# Generated outputs
+corefinst_code.zip
+*.zip
+*.tar.gz
+*.tar.bz2
+
+# Model checkpoints and weights
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+adapter_model*/
+checkpoint-*/
+
+# Logs
+*.log
+runs/
+wandb/
+lightning_logs/
+
+# Misc
+.cache/
+.env

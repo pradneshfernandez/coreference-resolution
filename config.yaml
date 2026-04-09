@@ -1,0 +1,86 @@
+# ============================================================
+# CorefInst configuration for Hindi / Tamil / Bengali
+# Mirrors the experimental setup from the paper (TACL 2026).
+# ============================================================
+
+# ----------------------------------------------------------
+# Data paths
+# ----------------------------------------------------------
+data:
+  root: "transmucores_data"          # path to the extracted dataset directory
+  output_dir: "processed_data"       # where to save processed JSONL files
+  languages:
+    hi:
+      name: "Hindi"
+      codes: ["hin_Deva"]
+    ta:
+      name: "Tamil"
+      codes: ["tam_Taml"]
+    bn:
+      name: "Bengali"
+      codes: ["ben_Beng"]
+
+# ----------------------------------------------------------
+# Preprocessing
+# ----------------------------------------------------------
+preprocessing:
+  instruction_id: 5          # best instruction from Table 1 (Llama + Inst. #5)
+  max_tokens_per_frame: 256  # approx tokens per frame; each input = 2 frames + [MID]
+  min_mentions_per_example: 1
+
+# ----------------------------------------------------------
+# Model
+# ----------------------------------------------------------
+model:
+  # 4-bit quantised Llama 3.1 8B via unsloth (matches paper exactly).
+  # Alternatives:
+  #   "unsloth/gemma-2-9b-it-bnb-4bit"
+  #   "unsloth/mistral-7b-instruct-v0.3-bnb-4bit"
+  #   "Qwen/Qwen2.5-1.5B-Instruct"   ← smaller; useful for CPU/low-VRAM runs
+  name: "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"
+  max_seq_length: 4096
+  load_in_4bit: true
+
+# ----------------------------------------------------------
+# LoRA (QLoRA)
+# ----------------------------------------------------------
+lora:
+  rank: 16           # R = 16 as in the paper
+  alpha: 16
+  dropout: 0.0
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# ----------------------------------------------------------
+# Training
+# ----------------------------------------------------------
+training:
+  output_dir: "model_output"
+  num_epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 4     # effective batch = 16
+  learning_rate: 2.0e-4
+  warmup_ratio: 0.03
+  lr_scheduler: "cosine"
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  logging_steps: 10
+  save_steps: 200
+  eval_steps: 200
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 0
+  seed: 42
+
+# ----------------------------------------------------------
+# Inference
+# ----------------------------------------------------------
+inference:
+  max_cluster_id: 200    # cluster numbers predicted by the model are clamped here
+  output_dir: "inference_output"

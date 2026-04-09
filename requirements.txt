@@ -1,0 +1,25 @@
+# Core ML stack
+torch>=2.1.0
+transformers>=4.44.0
+datasets>=2.20.0
+peft>=0.12.0
+trl>=0.10.0
+bitsandbytes>=0.43.0     # 4-bit quantization (GPU only)
+accelerate>=0.33.0
+
+# Optional but strongly recommended: faster training + quantization-aware LoRA
+# Install with: pip install "unsloth[colab-new]" or pip install unsloth
+# unsloth
+
+# Flash Attention 2 (optional, speeds up attention on Ampere+ GPUs)
+# pip install flash-attn --no-build-isolation
+
+# CEAFe optimal assignment (falls back to greedy if not installed)
+scipy>=1.11.0
+
+# Config parsing
+PyYAML>=6.0
+
+# Utilities
+numpy>=1.24.0
+tqdm>=4.66.0
