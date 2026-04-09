@@ -147,16 +147,19 @@ def train(
 
         # DataCollatorForCompletionOnlyLM moved across TRL versions — try all locations.
         DataCollatorForCompletionOnlyLM = None
-        for _import in [
-            "from trl import DataCollatorForCompletionOnlyLM",
-            "from trl.trainer import DataCollatorForCompletionOnlyLM",
-            "from trl.trainer.utils import DataCollatorForCompletionOnlyLM",
+        for _mod, _cls in [
+            ("trl", "DataCollatorForCompletionOnlyLM"),
+            ("trl.trainer", "DataCollatorForCompletionOnlyLM"),
+            ("trl.trainer.utils", "DataCollatorForCompletionOnlyLM"),
+            ("trl.data_utils", "DataCollatorForCompletionOnlyLM"),
         ]:
             try:
-                exec(_import, globals())
-                DataCollatorForCompletionOnlyLM = globals().get("DataCollatorForCompletionOnlyLM")
-                break
-            except (ImportError, KeyError):
+                import importlib
+                _m = importlib.import_module(_mod)
+                DataCollatorForCompletionOnlyLM = getattr(_m, _cls, None)
+                if DataCollatorForCompletionOnlyLM is not None:
+                    break
+            except ImportError:
                 pass
 
         # Identify the response template so we only compute loss on output tokens.
