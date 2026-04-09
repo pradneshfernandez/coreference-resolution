@@ -221,13 +221,40 @@ def load_for_inference(
 
     if use_unsloth:
         from unsloth import FastLanguageModel  # type: ignore
+        import json as _json
 
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=checkpoint_path,
-            max_seq_length=max_seq_length,
-            dtype=None,
-            load_in_4bit=load_in_4bit,
-        )
+        # Detect whether checkpoint_path is a LoRA adapter directory or a full model.
+        # A LoRA adapter directory has adapter_config.json; a full model has config.json
+        # with a non-adapter architecture.
+        adapter_cfg = os.path.join(checkpoint_path, "adapter_config.json")
+        is_adapter = os.path.isfile(adapter_cfg)
+
+        if is_adapter:
+            # Load base model name from adapter_config.json
+            with open(adapter_cfg) as _f:
+                _acfg = _json.load(_f)
+            base_name = base_model_name or _acfg.get("base_model_name_or_path")
+            if base_name is None:
+                raise ValueError(
+                    "adapter_config.json has no base_model_name_or_path. "
+                    "Pass base_model_name explicitly to load_for_inference()."
+                )
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=base_name,
+                max_seq_length=max_seq_length,
+                dtype=None,
+                load_in_4bit=load_in_4bit,
+            )
+            from peft import PeftModel  # type: ignore
+            model = PeftModel.from_pretrained(model, checkpoint_path)
+        else:
+            model, tokenizer = FastLanguageModel.from_pretrained(
+                model_name=checkpoint_path,
+                max_seq_length=max_seq_length,
+                dtype=None,
+                load_in_4bit=load_in_4bit,
+            )
+
         FastLanguageModel.for_inference(model)
         return model, tokenizer
     else:
