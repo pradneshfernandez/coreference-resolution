@@ -15,7 +15,7 @@ import os
 from typing import Optional
 
 import torch
-from datasets import Dataset, concatenate_datasets
+from datasets import Dataset
 from transformers import TrainingArguments
 
 from coref.data.dataset_builder import format_for_sft, load_jsonl
@@ -117,14 +117,24 @@ def train(
     # Allow CUDA memory allocator to use expandable segments — reduces OOM fragmentation.
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
+    # Unsloth sets up gradient checkpointing on the model itself via
+    # use_gradient_checkpointing="unsloth" in get_peft_model — don't duplicate it
+    # in TrainingArguments or the two implementations conflict.
+    _use_unsloth = False
+    try:
+        import unsloth  # type: ignore  # noqa: F401
+        _use_unsloth = True
+    except ImportError:
+        pass
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=per_device_batch_size,
         per_device_eval_batch_size=per_device_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
-        gradient_checkpointing=True,        # trade compute for memory — essential on T4
-        gradient_checkpointing_kwargs={"use_reentrant": False},
+        gradient_checkpointing=not _use_unsloth,   # unsloth handles its own GC
+        gradient_checkpointing_kwargs={"use_reentrant": False} if not _use_unsloth else {},
         learning_rate=learning_rate,
         warmup_steps=int(warmup_ratio * (len(train_dataset) // (per_device_batch_size * gradient_accumulation_steps)) * num_epochs),
         lr_scheduler_type=lr_scheduler,

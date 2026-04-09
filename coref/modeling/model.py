@@ -247,6 +247,12 @@ def load_for_inference(
             )
             from peft import PeftModel  # type: ignore
             model = PeftModel.from_pretrained(model, checkpoint_path)
+            # Override tokenizer with the one saved alongside the adapter
+            # (handles any special tokens added during fine-tuning)
+            from transformers import AutoTokenizer  # type: ignore
+            tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
         else:
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=checkpoint_path,
