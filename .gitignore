@@ -36,7 +36,6 @@ inference_output/
 model_output/
 
 # Generated outputs
-corefinst_code.zip
 *.zip
 *.tar.gz
 *.tar.bz2

@@ -18,8 +18,8 @@ import torch
 from datasets import Dataset, concatenate_datasets
 from transformers import TrainingArguments
 
-from .dataset_builder import format_for_sft, load_jsonl
-from .model import load_model_and_tokenizer
+from coref.data.dataset_builder import format_for_sft, load_jsonl
+from coref.modeling.model import load_model_and_tokenizer
 
 
 # ---------------------------------------------------------------------------

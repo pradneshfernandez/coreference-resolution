@@ -1,24 +1,19 @@
 """
-run_inference.py — Run controlled inference and evaluate on the test set.
+scripts/run_inference.py — Run controlled inference and evaluate on the test set.
 
 Usage:
-  python run_inference.py [--config config.yaml] [--checkpoint PATH] [--split test]
-                          [--language hi|ta|bn|all] [--output_dir inference_output/]
-
-For each document:
-  1. Group its FrameExamples by doc_id (from the test JSONL).
-  2. Run controlled inference → per-example predicted local cluster numbers.
-  3. Apply Algorithm 1 (merge_clusters_over_frames) → global clusters.
-  4. Compare against gold clusters → CoNLL metrics.
-
-Results are printed per language and overall.
+  python scripts/run_inference.py [--config config.yaml] [--split test]
+                                  [--checkpoint PATH] [--language hi|ta|bn|all]
 """
 
 import argparse
 import collections
 import json
 import os
+import sys
 from typing import Dict, List, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml
 
@@ -37,13 +32,13 @@ def main(
 ) -> None:
     cfg = load_config(config_path)
 
-    data_dir    = cfg["data"]["output_dir"]
-    data_root   = cfg["data"]["root"]
-    model_cfg   = cfg["model"]
-    infer_cfg   = cfg.get("inference", {})
-    max_clust   = infer_cfg.get("max_cluster_id", 200)
-    instr_id    = cfg["preprocessing"]["instruction_id"]
-    max_tokens  = cfg["preprocessing"]["max_tokens_per_frame"]
+    data_dir   = cfg["data"]["output_dir"]
+    data_root  = cfg["data"]["root"]
+    model_cfg  = cfg["model"]
+    infer_cfg  = cfg.get("inference", {})
+    max_clust  = infer_cfg.get("max_cluster_id", 200)
+    instr_id   = cfg["preprocessing"]["instruction_id"]
+    max_tokens = cfg["preprocessing"]["max_tokens_per_frame"]
 
     if checkpoint is None:
         checkpoint = os.path.join(cfg["training"]["output_dir"], "final")
@@ -52,11 +47,8 @@ def main(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # ------------------------------------------------------------------
-    # 1. Load model
-    # ------------------------------------------------------------------
     import torch
-    from src.model import load_for_inference
+    from coref.modeling.model import load_for_inference
 
     print(f"Loading model from {checkpoint} …")
     model, tokenizer = load_for_inference(
@@ -67,13 +59,10 @@ def main(
     device = next(model.parameters()).device
     print(f"Model on device: {device}")
 
-    # ------------------------------------------------------------------
-    # 2. Load test data (gold documents + frame examples)
-    # ------------------------------------------------------------------
-    from src.dataset_builder import load_documents, build_examples
-    from src.inference import run_inference_on_examples
-    from src.postprocessor import merge_clusters_over_frames, extract_gold_clusters
-    from src.evaluate import evaluate_documents, print_scores
+    from coref.data.dataset_builder import load_documents, build_examples, load_jsonl
+    from coref.eval.inference import run_inference_on_examples
+    from coref.eval.postprocessor import merge_clusters_over_frames, extract_gold_clusters, write_conll_predictions
+    from coref.eval.evaluate import evaluate_documents, print_scores
 
     if languages is None:
         languages = list(cfg["data"]["languages"].keys())
@@ -84,17 +73,12 @@ def main(
         docs = load_documents(data_root, split=split, languages=languages)
         examples_all = build_examples(docs, instruction_id=instr_id, max_tokens_per_frame=max_tokens)
     else:
-        from src.dataset_builder import load_jsonl
         hf_ds = load_jsonl(test_jsonl)
         examples_all = list(hf_ds)
 
-    # Load gold documents (needed for gold cluster extraction)
     gold_docs = load_documents(data_root, split=split, languages=languages)
     gold_doc_map = {doc.doc_id: doc for doc in gold_docs}
 
-    # ------------------------------------------------------------------
-    # 3. Group examples by doc_id (maintain order within each doc)
-    # ------------------------------------------------------------------
     doc_examples: Dict[str, List[dict]] = collections.OrderedDict()
     for ex in examples_all:
         did = ex["doc_id"] if isinstance(ex, dict) else ex.doc_id
@@ -102,9 +86,6 @@ def main(
 
     print(f"\n{len(doc_examples)} documents | {len(examples_all)} frame examples")
 
-    # ------------------------------------------------------------------
-    # 4. Inference + postprocessing + evaluation per language
-    # ------------------------------------------------------------------
     lang_gold: Dict[str, List] = collections.defaultdict(list)
     lang_pred: Dict[str, List] = collections.defaultdict(list)
 
@@ -112,37 +93,24 @@ def main(
         if di % 20 == 0:
             print(f"  [{di}/{len(doc_examples)}] {doc_id}")
 
-        # Run controlled inference for all frame pairs in this document
         results = run_inference_on_examples(
             model, tokenizer, frame_exs, device=device,
             max_cluster_id=max_clust, verbose=False,
         )
-
-        # Merge local → global clusters (Algorithm 1)
         _, pred_clusters = merge_clusters_over_frames(results)
 
-        # Gold clusters
         if doc_id in gold_doc_map:
             _, gold_clusters = extract_gold_clusters(gold_doc_map[doc_id])
             lang = gold_doc_map[doc_id].language or "all"
+            pred_glob = {mpos: gid for gid, mset in pred_clusters.items() for mpos in mset}
+            write_conll_predictions(gold_doc_map[doc_id], pred_glob,
+                                    os.path.join(output_dir, f"{doc_id}.conll"))
         else:
             gold_clusters = {}
             lang = "all"
 
         lang_gold[lang].append(gold_clusters)
         lang_pred[lang].append(pred_clusters)
-
-        # Save predicted CoNLL (optional, for external scorer)
-        if doc_id in gold_doc_map:
-            from src.postprocessor import write_conll_predictions
-            pred_glob = {mpos: gid for gid, mset in pred_clusters.items() for mpos in mset}
-            out_file = os.path.join(output_dir, f"{doc_id}.conll")
-            write_conll_predictions(gold_doc_map[doc_id], pred_glob, out_file)
-
-    # ------------------------------------------------------------------
-    # 5. Print results
-    # ------------------------------------------------------------------
-    from src.evaluate import evaluate_documents, print_scores
 
     all_gold, all_pred = [], []
     for lang in sorted(lang_gold.keys()):
@@ -157,7 +125,6 @@ def main(
         overall = evaluate_documents(all_gold, all_pred)
         print_scores(overall, label=f"OVERALL ({len(all_gold)} docs)")
 
-    # Save JSON results
     results_path = os.path.join(output_dir, "results.json")
     summary = {}
     for lang in sorted(lang_gold.keys()):
@@ -172,9 +139,9 @@ def main(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run CorefInst inference and evaluate.")
     parser.add_argument("--config",     default="config.yaml")
-    parser.add_argument("--checkpoint", default=None, help="Path to fine-tuned model checkpoint")
+    parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--split",      default="test", choices=["train", "dev", "test"])
-    parser.add_argument("--language",   default="all",  help="'all', 'hi', 'ta', or 'bn'")
+    parser.add_argument("--language",   default="all", help="'all', 'hi', 'ta', or 'bn'")
     parser.add_argument("--output_dir", default=None)
     args = parser.parse_args()
 

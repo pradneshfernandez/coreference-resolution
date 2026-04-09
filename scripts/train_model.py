@@ -1,15 +1,16 @@
 """
-train_model.py — Fine-tune a causal LM on CorefInst examples.
+scripts/train_model.py — Fine-tune a causal LM on CorefInst examples.
 
 Usage:
-  python train_model.py [--config config.yaml]
-
-Reads processed_data/{train,dev}.jsonl, fine-tunes the model specified in
-config.yaml, saves the LoRA adapter to model_output/final/.
+  python scripts/train_model.py [--config config.yaml]
+  python scripts/train_model.py --config configs/t4.yaml --few_shot 50
 """
 
 import argparse
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml
 
@@ -26,7 +27,6 @@ def main(config_path: str = "config.yaml", few_shot_n: int = None) -> None:
     train_path = os.path.join(data_dir, "train.jsonl")
     dev_path   = os.path.join(data_dir, "dev.jsonl")
 
-    # Few-shot: sub-sample N examples per language from train set
     if few_shot_n is not None:
         import json, random
         print(f"\n[Few-shot] Sampling {few_shot_n} examples per language …")
@@ -49,11 +49,11 @@ def main(config_path: str = "config.yaml", few_shot_n: int = None) -> None:
         train_path = fs_path
         print(f"Few-shot train file: {fs_path} ({len(selected)} total examples)")
 
-    model_cfg  = cfg["model"]
-    lora_cfg   = cfg["lora"]
-    train_cfg  = cfg["training"]
+    model_cfg = cfg["model"]
+    lora_cfg  = cfg["lora"]
+    train_cfg = cfg["training"]
 
-    from src.train import train
+    from coref.modeling.train import train
 
     train(
         train_path=train_path,
@@ -87,8 +87,8 @@ def main(config_path: str = "config.yaml", few_shot_n: int = None) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune CorefInst model.")
-    parser.add_argument("--config",    default="config.yaml", help="Path to config YAML")
-    parser.add_argument("--few_shot",  type=int, default=None,
-                        help="If set, train on only N examples per language (few-shot mode)")
+    parser.add_argument("--config",   default="config.yaml")
+    parser.add_argument("--few_shot", type=int, default=None,
+                        help="Train on N examples per language (few-shot mode)")
     args = parser.parse_args()
     main(args.config, few_shot_n=args.few_shot)

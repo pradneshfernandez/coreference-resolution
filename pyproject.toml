@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "coref-inst"
+version = "0.1.0"
+description = "Instruction-tuned coreference resolution for Indic languages (CorefInst, TACL 2026)"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.1.0",
+    "transformers>=4.44.0",
+    "datasets>=2.20.0",
+    "peft>=0.12.0",
+    "trl>=0.10.0",
+    "accelerate>=0.33.0",
+    "scipy>=1.11.0",
+    "PyYAML>=6.0",
+    "numpy>=1.24.0",
+    "tqdm>=4.66.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["coref*"]

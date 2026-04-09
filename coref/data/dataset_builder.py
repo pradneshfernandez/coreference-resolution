@@ -30,8 +30,8 @@ from typing import Dict, List, Optional
 
 from datasets import Dataset
 
-from .conll_parser import Document, load_conll_dir
-from .preprocessor import FrameExample, create_frame_examples
+from coref.data.conll_parser import Document, load_conll_dir
+from coref.data.preprocessor import FrameExample, create_frame_examples
 
 
 # ---------------------------------------------------------------------------

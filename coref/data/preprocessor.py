@@ -19,7 +19,7 @@ Algorithm 1 (postprocessor.py) exploits at inference time.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .conll_parser import Document, Mention, Sentence
+from coref.data.conll_parser import Document, Mention, Sentence
 
 
 # ---------------------------------------------------------------------------

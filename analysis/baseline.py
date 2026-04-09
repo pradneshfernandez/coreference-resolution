@@ -23,9 +23,9 @@ from typing import Dict, List, Set, Tuple
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import yaml
-from src.conll_parser import Document, load_conll_dir, parse_conll_file
-from src.evaluate import evaluate_documents, print_scores
-from src.postprocessor import extract_gold_clusters
+from coref.data.conll_parser import Document, load_conll_dir, parse_conll_file
+from coref.eval.evaluate import evaluate_documents, print_scores
+from coref.eval.postprocessor import extract_gold_clusters
 
 # Language config inline (avoids importing dataset_builder which requires `datasets`)
 LANGUAGE_CONFIGS: Dict[str, dict] = {
