@@ -114,12 +114,17 @@ def train(
     # ------------------------------------------------------------------
     os.makedirs(output_dir, exist_ok=True)
 
+    # Allow CUDA memory allocator to use expandable segments — reduces OOM fragmentation.
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=per_device_batch_size,
         per_device_eval_batch_size=per_device_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_checkpointing=True,        # trade compute for memory — essential on T4
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         learning_rate=learning_rate,
         warmup_steps=int(warmup_ratio * (len(train_dataset) // (per_device_batch_size * gradient_accumulation_steps)) * num_epochs),
         lr_scheduler_type=lr_scheduler,
