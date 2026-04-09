@@ -58,13 +58,19 @@ def _load_mujadia(root: str, split: str) -> List[Document]:
 
 
 def _load_onto_notes(root: str, split: str, lang_code: str, lang: str) -> List[Document]:
-    """Load onto_notes_archive for one language (recursive search)."""
+    """Load onto_notes_archive for one language (recursive search).
+
+    OntoNotes filenames do not contain language codes — the language is embedded
+    in the doc_id inside the file.  Load all files without a filename filter,
+    then keep only documents whose doc_id contains the language code.
+    """
     split_map = {"train": "train", "dev": "development", "test": "test"}
     dname = split_map.get(split, split)
     data_dir = os.path.join(root, "onto_notes_archive", dname)
-    return load_conll_dir(
-        data_dir, language_filter=[lang_code], language=lang, recursive=True
+    all_docs = load_conll_dir(
+        data_dir, language_filter=None, language=lang, recursive=True
     )
+    return [d for d in all_docs if lang_code in d.doc_id]
 
 
 def _load_litbank(root: str, split: str, lang_code: str, lang: str) -> List[Document]:
