@@ -60,17 +60,19 @@ def _load_mujadia(root: str, split: str) -> List[Document]:
 def _load_onto_notes(root: str, split: str, lang_code: str, lang: str) -> List[Document]:
     """Load onto_notes_archive for one language (recursive search).
 
-    OntoNotes filenames do not contain language codes — the language is embedded
-    in the doc_id inside the file.  Load all files without a filename filter,
-    then keep only documents whose doc_id contains the language code.
+    The archive may not have all splits — e.g. only 'development/' is released.
+    Fall back to 'development' if the requested split directory is absent.
+    Filenames contain the language code (e.g. 'c2e_0000_ben_Beng_compact_trans.conll').
     """
     split_map = {"train": "train", "dev": "development", "test": "test"}
     dname = split_map.get(split, split)
     data_dir = os.path.join(root, "onto_notes_archive", dname)
-    all_docs = load_conll_dir(
-        data_dir, language_filter=None, language=lang, recursive=True
+    if not os.path.isdir(data_dir):
+        # Fallback: use development split if the requested one isn't present
+        data_dir = os.path.join(root, "onto_notes_archive", "development")
+    return load_conll_dir(
+        data_dir, language_filter=[lang_code], language=lang, recursive=True
     )
-    return [d for d in all_docs if lang_code in d.doc_id]
 
 
 def _load_litbank(root: str, split: str, lang_code: str, lang: str) -> List[Document]:
