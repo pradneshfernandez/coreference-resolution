@@ -95,7 +95,9 @@ def main(
 
         results = run_inference_on_examples(
             model, tokenizer, frame_exs, device=device,
-            max_cluster_id=max_clust, verbose=False,
+            max_cluster_id=max_clust,
+            max_seq_length=model_cfg["max_seq_length"],
+            verbose=False,
         )
         _, pred_clusters = merge_clusters_over_frames(results)
 

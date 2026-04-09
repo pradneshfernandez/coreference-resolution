@@ -68,6 +68,7 @@ def _predict_cluster_number(
     prompt: str,
     device: torch.device,
     max_cluster_id: int = 200,
+    max_seq_length: int = 4096,
 ) -> int:
     """
     Given a prompt that ends with '#', predict the next integer (cluster number).
@@ -75,17 +76,26 @@ def _predict_cluster_number(
     Strategy: generate up to 4 new tokens greedily, decode them, extract the
     leading digit sequence.
     """
+    # Truncate from the LEFT so we preserve the most recent context (the partial
+    # output + current MASK position). tokenizer.model_max_length is often 131072
+    # for Llama 3.1 — we must use max_seq_length (4096) explicitly.
+    max_input_len = max_seq_length - 4   # leave room for 4 new tokens
+    orig_truncation_side = tokenizer.truncation_side
+    tokenizer.truncation_side = "left"
+
     inputs = tokenizer(
         prompt,
         return_tensors="pt",
         truncation=True,
-        max_length=tokenizer.model_max_length - 4,
+        max_length=max_input_len,
     ).to(device)
+
+    tokenizer.truncation_side = orig_truncation_side  # restore
 
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=4,       # enough for numbers 0–9999
+            max_new_tokens=4,
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
@@ -113,6 +123,7 @@ def controlled_inference(
     masked_input: str,
     device: torch.device,
     max_cluster_id: int = 200,
+    max_seq_length: int = 4096,
 ) -> Tuple[str, List[int]]:
     """
     Run the controlled inference procedure on one masked input.
@@ -151,7 +162,7 @@ def controlled_inference(
         )
 
         pred_num = _predict_cluster_number(
-            model, tokenizer, prompt, device, max_cluster_id
+            model, tokenizer, prompt, device, max_cluster_id, max_seq_length
         )
         predicted_locals.append(pred_num)
 
@@ -171,6 +182,7 @@ def run_inference_on_examples(
     examples: list,                 # list of FrameExample (or dicts with same fields)
     device: Optional[torch.device] = None,
     max_cluster_id: int = 200,
+    max_seq_length: int = 4096,
     verbose: bool = False,
 ) -> List[dict]:
     """
@@ -221,7 +233,8 @@ def run_inference_on_examples(
             print(f"  Inference [{idx}/{len(examples)}] doc={doc_id} …")
 
         output_text, predicted_locals = controlled_inference(
-            model, tokenizer, instruction, masked_input, device, max_cluster_id
+            model, tokenizer, instruction, masked_input, device,
+            max_cluster_id, max_seq_length
         )
 
         # Distribute predicted local numbers back to before / after mentions
