@@ -186,11 +186,14 @@ def write_conll_predictions(
     for (s_idx, start, end), gid in pred_glob_cls.items():
         if s_idx not in coref_col:
             continue
+        sent_col = coref_col[s_idx]
+        if start not in sent_col or end not in sent_col:
+            continue   # predicted span out of sentence bounds — skip
         if start == end:
-            coref_col[s_idx][start].append(f"({gid})")
+            sent_col[start].append(f"({gid})")
         else:
-            coref_col[s_idx][start].append(f"({gid}")
-            coref_col[s_idx][end].append(f"{gid})")
+            sent_col[start].append(f"({gid}")
+            sent_col[end].append(f"{gid})")
 
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write(f"#begin document ({doc.doc_id}); part {part}\n")
