@@ -96,6 +96,7 @@ def _predict_cluster_number(
         output_ids = model.generate(
             **inputs,
             max_new_tokens=4,
+            max_length=None,   # override unsloth's default max_length to avoid warning
             do_sample=False,
             temperature=1.0,
             pad_token_id=tokenizer.eos_token_id,
