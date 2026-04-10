@@ -230,29 +230,24 @@ def load_for_inference(
         is_adapter = os.path.isfile(adapter_cfg)
 
         if is_adapter:
-            # Load base model name from adapter_config.json
-            with open(adapter_cfg) as _f:
-                _acfg = _json.load(_f)
-            base_name = base_model_name or _acfg.get("base_model_name_or_path")
-            if base_name is None:
-                raise ValueError(
-                    "adapter_config.json has no base_model_name_or_path. "
-                    "Pass base_model_name explicitly to load_for_inference()."
-                )
+            # Use unsloth's native adapter loading.
+            # Passing the adapter directory directly lets unsloth read
+            # adapter_config.json, load the base model internally, and apply
+            # the LoRA weights — without going through PeftModel, which would
+            # wrap the model and break unsloth's fast-inference kernel patch.
             model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=base_name,
+                model_name=checkpoint_path,
                 max_seq_length=max_seq_length,
                 dtype=None,
                 load_in_4bit=load_in_4bit,
             )
-            from peft import PeftModel  # type: ignore
-            model = PeftModel.from_pretrained(model, checkpoint_path)
             # Override tokenizer with the one saved alongside the adapter
             # (handles any special tokens added during fine-tuning)
             from transformers import AutoTokenizer  # type: ignore
-            tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
+            _saved_tok = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
+            if _saved_tok.pad_token is None:
+                _saved_tok.pad_token = _saved_tok.eos_token
+            tokenizer = _saved_tok
         else:
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=checkpoint_path,
