@@ -11,6 +11,7 @@ import collections
 import json
 import os
 import sys
+import time
 from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -90,8 +91,8 @@ def main(
     lang_pred: Dict[str, List] = collections.defaultdict(list)
 
     for di, (doc_id, frame_exs) in enumerate(doc_examples.items()):
-        if di % 20 == 0:
-            print(f"  [{di}/{len(doc_examples)}] {doc_id}")
+        t0 = time.time()
+        print(f"  [{di+1}/{len(doc_examples)}] {doc_id} ({len(frame_exs)} frames) …", end=" ", flush=True)
 
         results = run_inference_on_examples(
             model, tokenizer, frame_exs, device=device,
@@ -100,6 +101,9 @@ def main(
             verbose=False,
         )
         _, pred_clusters = merge_clusters_over_frames(results)
+
+        elapsed = time.time() - t0
+        print(f"done in {elapsed:.1f}s ({elapsed / max(len(frame_exs), 1):.2f}s/frame)")
 
         if doc_id in gold_doc_map:
             _, gold_clusters = extract_gold_clusters(gold_doc_map[doc_id])
