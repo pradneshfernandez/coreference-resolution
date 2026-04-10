@@ -257,6 +257,11 @@ def load_for_inference(
             )
 
         FastLanguageModel.for_inference(model)
+        # Remove max_length from the stored generation_config so that
+        # calling generate(max_new_tokens=4) does not trigger a conflict
+        # warning between max_new_tokens and the stored max_length=131072.
+        if hasattr(model, "generation_config"):
+            model.generation_config.max_length = None
         return model, tokenizer
     else:
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig

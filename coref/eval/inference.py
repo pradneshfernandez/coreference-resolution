@@ -25,7 +25,6 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 import torch
-from transformers import GenerationConfig
 
 
 # ---------------------------------------------------------------------------
@@ -93,14 +92,12 @@ def _predict_cluster_number(
 
     tokenizer.truncation_side = orig_truncation_side  # restore
 
-    _gen_cfg = GenerationConfig(
-        max_new_tokens=4,
-        do_sample=False,
-        pad_token_id=tokenizer.eos_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-    )
     with torch.no_grad():
-        output_ids = model.generate(**inputs, generation_config=_gen_cfg)
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=4,
+            do_sample=False,
+        )
 
     new_token_ids = output_ids[0][inputs["input_ids"].shape[1]:]
     generated = tokenizer.decode(new_token_ids, skip_special_tokens=True)
