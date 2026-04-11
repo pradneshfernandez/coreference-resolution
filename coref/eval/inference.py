@@ -56,11 +56,23 @@ def _tokenize_left_truncated(tokenizer, text: str, max_len: int, device):
 
 def _model_step(model, input_ids, attention_mask, past_key_values):
     """One forward pass; returns (logits at last position, updated past_key_values)."""
+    # Unsloth's patched forward requires explicit position_ids when past_key_values
+    # is provided — it cannot infer them from the KV cache length on its own.
+    if past_key_values is not None:
+        kv_len = past_key_values[0][0].shape[2]
+        new_len = input_ids.shape[1]
+        position_ids = torch.arange(
+            kv_len, kv_len + new_len, device=input_ids.device
+        ).unsqueeze(0)
+    else:
+        position_ids = None
+
     with torch.no_grad():
         out = model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
+            position_ids=position_ids,
             use_cache=True,
             return_dict=True,
         )
