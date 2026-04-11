@@ -1,0 +1,273 @@
+from google.colab import drive
+drive.mount('/content/drive')
+
+# ── Edit these if your layout differs ────────────────────────────────────────
+DRIVE_ROOT   = '/content/drive/MyDrive/CorefInst'
+DATA_TAR     = f'{DRIVE_ROOT}/transmucores_data.tar.gz'
+GITHUB_REPO  = 'https://github.com/pradneshfernandez/coreference-resolution'
+PROJECT_DIR  = '/content/corefinst'
+CHECKPOINT   = f'{DRIVE_ROOT}/model_output/final'
+OUTPUT_DIR   = f'{DRIVE_ROOT}/inference_output'
+DATA_DIR     = f'{DRIVE_ROOT}/transmucores_data'
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+os.makedirs(PROJECT_DIR, exist_ok=True)
+print(f'Checkpoint : {CHECKPOINT}')
+print(f'Output dir : {OUTPUT_DIR}')
+print(f'Checkpoint exists: {os.path.isdir(CHECKPOINT)}')
+
+
+!pip install -q 'unsloth[colab-new]' 2>/dev/null || pip install -q unsloth
+!pip install -q transformers>=4.44.0 datasets>=2.20.0 peft>=0.12.0 \
+               trl>=0.10.0 bitsandbytes>=0.43.0 accelerate>=0.33.0 scipy PyYAML
+print('Done.')
+
+
+import os
+if os.path.isdir(f'{PROJECT_DIR}/.git'):
+    !cd {PROJECT_DIR} && git pull
+else:
+    !git clone {GITHUB_REPO} {PROJECT_DIR}
+
+os.chdir(PROJECT_DIR)
+!pip install -q -e . --quiet
+!git log --oneline -3
+
+
+import os, tarfile
+
+if not os.path.isdir(DATA_DIR):
+    if os.path.exists(DATA_TAR):
+        print(f'Extracting top-level archive to {DRIVE_ROOT} …')
+        with tarfile.open(DATA_TAR) as tf:
+            tf.extractall(DRIVE_ROOT)
+    else:
+        raise FileNotFoundError(f'Dataset not found: {DATA_TAR}')
+
+# Extract sub-archives (safe to re-run — checks each one)
+for sub in ['mujadia_conll', 'onto_notes', 'litbank_train', 'litbank_val', 'litbank_test']:
+    dest = os.path.join(DATA_DIR, sub.replace('onto_notes', 'onto_notes_archive').replace('litbank_train','litbank_train').replace('litbank_val','litbank_val').replace('litbank_test','litbank_test'))
+    gz   = os.path.join(DATA_DIR, f'{sub}.tar.gz')
+    # Use the actual extracted folder name for the check
+    check_dir = os.path.join(DATA_DIR, 'onto_notes_archive' if sub == 'onto_notes' else sub)
+    if os.path.isdir(check_dir):
+        print(f'  already extracted: {sub}')
+    elif os.path.exists(gz):
+        print(f'  extracting {sub} …')
+        with tarfile.open(gz) as tf:
+            tf.extractall(DATA_DIR)
+        print(f'  done.')
+    else:
+        print(f'  [warn] {gz} not found — skipping')
+
+# Verify
+print()
+for sub in ['mujadia_conll', 'onto_notes_archive', 'litbank_train', 'litbank_val', 'litbank_test']:
+    p = os.path.join(DATA_DIR, sub)
+    status = '✓' if os.path.isdir(p) else '✗ MISSING'
+    print(f'  {status}  {p}')
+
+
+# ── DIAGNOSTIC: inspect onto_notes_archive structure ─────────────────────
+# Run this BEFORE inference to verify the dataset extracted correctly.
+# If onto_notes shows 0 docs, the output here will reveal why.
+import os
+
+on_dir = os.path.join(DATA_DIR, 'onto_notes_archive')
+print(f'onto_notes_archive exists: {os.path.isdir(on_dir)}')
+
+if os.path.isdir(on_dir):
+    # Show top-level subdirs
+    print('\nTop-level contents:')
+    for name in sorted(os.listdir(on_dir)):
+        print(f'  {name}/')
+
+    # Find first 10 .conll files recursively and show name + first doc_id
+    print('\nFirst .conll files found (name → first #begin document id):')
+    count = 0
+    for dirpath, _, fnames in os.walk(on_dir):
+        for fname in sorted(fnames):
+            if fname.endswith('.conll') or fname.endswith('_conll'):
+                fpath = os.path.join(dirpath, fname)
+                rel = os.path.relpath(fpath, on_dir)
+                doc_id = ''
+                try:
+                    with open(fpath) as f:
+                        for line in f:
+                            if line.startswith('#begin document'):
+                                import re
+                                m = re.search(r'\((.+?)\)', line)
+                                doc_id = m.group(1) if m else line.strip()
+                                break
+                except Exception as e:
+                    doc_id = f'ERROR: {e}'
+                print(f'  {rel}  →  {doc_id}')
+                count += 1
+                if count >= 10:
+                    break
+        if count >= 10:
+            break
+else:
+    print('\nDirectory not found. Check Step 4 extraction.')
+    print('\nContents of DATA_DIR:')
+    for name in sorted(os.listdir(DATA_DIR)):
+        print(f'  {name}')
+
+
+import yaml, os, torch
+
+# Detect GPU and pick the right preset
+if torch.cuda.is_available():
+    props = torch.cuda.get_device_properties(0)
+    vram_gb = props.total_memory / 1e9
+    gpu_name = props.name.lower()
+    if 'h100' in gpu_name:   PRESET = 'h100'
+    elif vram_gb >= 35:       PRESET = 'a100'
+    elif vram_gb >= 20:       PRESET = 'l4'
+    else:                     PRESET = 't4'
+else:
+    PRESET = 'cpu'
+
+import shutil
+preset_path = os.path.join(PROJECT_DIR, f'configs/{PRESET}.yaml')
+config_path = os.path.join(PROJECT_DIR, 'config.yaml')
+shutil.copy(preset_path, config_path)
+
+with open(config_path) as f:
+    cfg = yaml.safe_load(f)
+
+cfg['data']['root']            = DATA_DIR
+cfg['data']['output_dir']      = f'{DRIVE_ROOT}/processed_data'
+cfg['training']['output_dir']  = f'{DRIVE_ROOT}/model_output'
+cfg['inference']['output_dir'] = OUTPUT_DIR
+
+with open(config_path, 'w') as f:
+    yaml.dump(cfg, f)
+
+print(f'Preset  : {PRESET}')
+print(f'data.root       → {cfg["data"]["root"]}')
+print(f'inference.dir   → {cfg["inference"]["output_dir"]}')
+
+
+# ── Smoke test — 1 doc per language ──────────────────────────────────────
+import os
+os.environ.setdefault("UNSLOTH_DISABLE_STATISTICS", "1")  # prevent 120s telemetry timeout
+
+import sys, json, time, collections
+sys.path.insert(0, PROJECT_DIR)
+
+import torch, yaml
+from coref.modeling.model import load_for_inference
+from coref.data.dataset_builder import load_documents, load_jsonl
+from coref.eval.inference import run_inference_on_examples
+from coref.eval.postprocessor import merge_clusters_over_frames
+
+with open(os.path.join(PROJECT_DIR, 'config.yaml')) as f:
+    cfg = yaml.safe_load(f)
+
+model_cfg = cfg['model']
+max_clust = cfg.get('inference', {}).get('max_cluster_id', 200)
+
+# Pre-flight: verify test data exists BEFORE spending time loading the model
+test_jsonl = os.path.join(cfg['data']['output_dir'], 'test.jsonl')
+if not os.path.exists(test_jsonl):
+    raise FileNotFoundError(
+        f'test.jsonl not found: {test_jsonl}\n'
+        'Run scripts/prepare_data.py first, or check DATA_DIR in Step 1.'
+    )
+
+print('Loading model …')
+_model, _tokenizer = load_for_inference(
+    checkpoint_path=CHECKPOINT,
+    max_seq_length=model_cfg['max_seq_length'],
+    load_in_4bit=model_cfg['load_in_4bit'],
+)
+_device = next(_model.parameters()).device
+print(f'Model on {_device}')
+
+# Load test examples and take 1 doc per language
+examples_all = list(load_jsonl(test_jsonl))
+
+doc_by_lang  = collections.defaultdict(list)
+doc_examples = collections.defaultdict(list)
+for ex in examples_all:
+    doc_id = ex['doc_id']
+    lang   = ex.get('language', 'all')
+    doc_examples[doc_id].append(ex)
+    if doc_id not in doc_by_lang[lang]:
+        doc_by_lang[lang].append(doc_id)
+
+smoke_docs = [doc_by_lang[lang][0] for lang in sorted(doc_by_lang) if doc_by_lang[lang]]
+print(f'\nSmoke test docs: {smoke_docs}\n')
+
+SLOW_THRESHOLD = 2.0
+all_ok = True
+
+for doc_id in smoke_docs:
+    frame_exs = doc_examples[doc_id]
+    t0 = time.time()
+    print(f'  {doc_id}  ({len(frame_exs)} frames) …', end=' ', flush=True)
+
+    results = run_inference_on_examples(
+        _model, _tokenizer, frame_exs,
+        device=_device,
+        max_cluster_id=max_clust,
+        max_seq_length=model_cfg['max_seq_length'],
+    )
+    merge_clusters_over_frames(results)
+
+    elapsed = time.time() - t0
+    spf     = elapsed / max(len(frame_exs), 1)
+    flag    = '  <<< SLOW — check inference path!' if spf > SLOW_THRESHOLD else ''
+    print(f'done  {elapsed:.1f}s  ({spf:.2f}s/frame){flag}')
+    if spf > SLOW_THRESHOLD:
+        all_ok = False
+
+print()
+if all_ok:
+    print('Smoke test PASSED. Proceed to Step 6b.')
+else:
+    print('Smoke test FAILED — inference too slow. Do NOT proceed to Step 6b.')
+    raise RuntimeError('Inference too slow — aborting before full run.')
+
+
+# Free smoke-test model before running the subprocess in Step 6b.
+# Both the notebook kernel and the subprocess share GPU VRAM;
+# leaving _model alive can cause OOM on smaller GPUs (e.g. T4).
+import gc, torch
+try:
+    del _model, _tokenizer
+except NameError:
+    pass
+gc.collect()
+torch.cuda.empty_cache()
+print(f'VRAM free: {torch.cuda.mem_get_info()[0]/1e9:.1f} GB — ready for Step 6b.')
+
+
+!python scripts/run_inference.py \
+    --config config.yaml \
+    --split test \
+    --checkpoint {CHECKPOINT} \
+    --output_dir {OUTPUT_DIR}
+
+
+# Model scores
+!python analysis/analyse_results.py --results_json {OUTPUT_DIR}/results.json
+
+
+# Baseline comparison (all-singletons, all-one-cluster, MFE)
+!python analysis/baseline.py --config config.yaml --split test
+
+
+# Verify all output files exist on Drive
+import os
+checks = [
+    f'{OUTPUT_DIR}/results.json',
+    f'{DRIVE_ROOT}/processed_data/test.jsonl',
+    f'{CHECKPOINT}/adapter_config.json',
+]
+for path in checks:
+    status = '✓' if os.path.exists(path) else '✗ MISSING'
+    print(f'{status}  {path}')
+
