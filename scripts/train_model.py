@@ -10,6 +10,8 @@ import argparse
 import os
 import sys
 
+os.environ.setdefault("UNSLOTH_DISABLE_STATISTICS", "1")   # suppress telemetry timeout
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import yaml

@@ -1,116 +1,74 @@
 """
 inference.py — Controlled inference engine for CorefInst.
 
-The key idea (Section 3.3 of the paper):
+Key idea (Section 3.3 of the paper):
   • The model's input contains multiple #MASK tokens — one per mention.
   • Instead of generating the entire output in one shot, we predict each
     #MASK token's cluster number sequentially, feeding every previous
     prediction back into the context before predicting the next one.
-  • This forces the model to rely on its own earlier decisions (autoregressive
-    consistency) and avoids random cluster-number fluctuations.
 
-Implementation:
-  1. Split the masked input on '#MASK' → list of text segments.
-  2. For each MASK position i:
-       a. Build the partial assistant output: seg_0 + '#' + n_0 + seg_1 + '#' + n_1 + … + seg_i + '#'
-       b. Format as a complete prompt (system+user+partial_assistant).
-       c. Run model.generate() with max_new_tokens=4; extract the leading integer.
-       d. Append the predicted cluster number.
-  3. Reconstruct the full output string and return predicted (mention, local_no) pairs.
+Optimised implementation — incremental KV-cache reuse:
+  • The prefix (instruction + masked_input + first segment + '#') is
+    processed ONCE per frame in a single forward pass.
+  • Each successive MASK only runs the model over the tiny delta tokens
+    (predicted digit(s) + next segment text + next '#'), NOT the full prompt.
+  • Per-MASK prefill cost: O(~10 tokens) instead of O(full_ctx_len).
+  • Uses model() directly instead of model.generate(), which avoids the
+    slow Transformers 5.5 generate() code path entirely.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
 
 # ---------------------------------------------------------------------------
-# Prompt builder
+# Internal helpers
 # ---------------------------------------------------------------------------
 
-def _build_partial_prompt(
-    tokenizer,
-    instruction: str,
-    masked_input: str,
-    partial_output: str,
-) -> str:
-    """
-    Construct the prompt for predicting the next cluster number.
-
-    We use the model's chat template with add_generation_prompt=True to place
-    the partial assistant output at the end (so the model continues from there).
-    """
-    # Build the conversation without the final assistant turn
+def _build_prefix_str(tokenizer, instruction: str, masked_input: str) -> str:
     messages = [
         {"role": "system", "content": instruction},
         {"role": "user",   "content": masked_input},
     ]
-    # Apply template up to the start of the assistant turn
-    prefix = tokenizer.apply_chat_template(
+    return tokenizer.apply_chat_template(
         messages,
         tokenize=False,
-        add_generation_prompt=True,   # appends the assistant header
+        add_generation_prompt=True,
     )
-    # Append the partial output produced so far
-    return prefix + partial_output
 
 
-# ---------------------------------------------------------------------------
-# Number prediction
-# ---------------------------------------------------------------------------
-
-def _predict_cluster_number(
-    model,
-    tokenizer,
-    prompt: str,
-    device: torch.device,
-    max_cluster_id: int = 200,
-    max_seq_length: int = 4096,
-) -> int:
-    """
-    Given a prompt that ends with '#', predict the next integer (cluster number).
-
-    Strategy: generate up to 4 new tokens greedily, decode them, extract the
-    leading digit sequence.
-    """
-    # Truncate from the LEFT so we preserve the most recent context (the partial
-    # output + current MASK position). tokenizer.model_max_length is often 131072
-    # for Llama 3.1 — we must use max_seq_length (4096) explicitly.
-    max_input_len = max_seq_length - 4   # leave room for 4 new tokens
-    orig_truncation_side = tokenizer.truncation_side
+def _tokenize_left_truncated(tokenizer, text: str, max_len: int, device):
+    orig = tokenizer.truncation_side
     tokenizer.truncation_side = "left"
-
-    inputs = tokenizer(
-        prompt,
+    enc = tokenizer(
+        text,
         return_tensors="pt",
         truncation=True,
-        max_length=max_input_len,
+        max_length=max_len,
     ).to(device)
+    tokenizer.truncation_side = orig
+    return enc
 
-    tokenizer.truncation_side = orig_truncation_side  # restore
 
+def _model_step(model, input_ids, attention_mask, past_key_values):
+    """One forward pass; returns (logits at last position, updated past_key_values)."""
     with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=4,
-            do_sample=False,
+        out = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=True,
+            return_dict=True,
         )
-
-    new_token_ids = output_ids[0][inputs["input_ids"].shape[1]:]
-    generated = tokenizer.decode(new_token_ids, skip_special_tokens=True)
-
-    m = re.match(r"^\s*(\d+)", generated)
-    if m:
-        num = int(m.group(1))
-        return min(num, max_cluster_id)
-    return 0    # default if no digit found
+    return out.logits[:, -1, :], out.past_key_values
 
 
 # ---------------------------------------------------------------------------
-# Controlled inference for one example
+# Main controlled-inference routine (one frame)
 # ---------------------------------------------------------------------------
 
 def controlled_inference(
@@ -123,50 +81,80 @@ def controlled_inference(
     max_seq_length: int = 4096,
 ) -> Tuple[str, List[int]]:
     """
-    Run the controlled inference procedure on one masked input.
+    Controlled inference with incremental KV-cache reuse.
 
-    Args:
-        model         — the fine-tuned causal LM
-        tokenizer     — matching tokenizer
-        instruction   — the instruction string (system message)
-        masked_input  — frame pair text with '#MASK' placeholders
-        device        — torch device
-        max_cluster_id — upper bound on cluster numbers (for sanity clamping)
-
-    Returns:
-        output_text      — masked_input with #MASK replaced by predicted numbers
-        predicted_locals — list of predicted local cluster numbers, in order of mention
+    1. Tokenise [prefix + segments[0] + '#'] and prime the KV cache once.
+    2. For each MASK i:
+         a. Greedy-decode up to 4 digit tokens from the last logit vector.
+         b. Record predicted cluster number.
+         c. Process [segments[i+1] + '#'] incrementally (tiny delta).
+    3. Reconstruct and return the output string.
     """
-    # Split on #MASK or @MASK to get text segments between MASK positions
     segments = re.split(r"[#@]MASK", masked_input)
     n_masks = len(segments) - 1
 
     if n_masks == 0:
-        # No mentions in this example
         return masked_input, []
 
+    # ── Prime KV with [prefix + segments[0] + '#'] ──────────────────────────
+    prefix_str  = _build_prefix_str(tokenizer, instruction, masked_input)
+    initial_str = prefix_str + segments[0] + "#"
+
+    enc = _tokenize_left_truncated(
+        tokenizer, initial_str, max_seq_length - 4, device
+    )
+
+    logits, kv = _model_step(model, enc["input_ids"], enc["attention_mask"], None)
+    kv_len = enc["input_ids"].shape[1]
+
     predicted_locals: List[int] = []
-    partial_output = segments[0]    # starts with the text before the first MASK
 
     for i in range(n_masks):
-        # The partial output ends with segment[i] and we need to predict
-        # the cluster number that comes after '#'
-        prompt = _build_partial_prompt(
-            tokenizer,
-            instruction,
-            masked_input,
-            partial_output + "#",
-        )
+        # ── Greedy-decode up to 4 digit tokens ──────────────────────────────
+        pred_ids:   List[int] = []
+        cur_kv     = kv
+        cur_len    = kv_len
+        cur_logits = logits
 
-        pred_num = _predict_cluster_number(
-            model, tokenizer, prompt, device, max_cluster_id, max_seq_length
-        )
+        for _ in range(4):
+            next_id  = int(cur_logits.argmax(dim=-1).item())
+            next_tok = tokenizer.decode([next_id]).strip()
+
+            if not re.match(r"^\d", next_tok):
+                break
+
+            pred_ids.append(next_id)
+            tok_t = torch.tensor([[next_id]], device=device)
+            mask  = torch.ones(1, cur_len + 1, device=device)
+            cur_logits, cur_kv = _model_step(model, tok_t, mask, cur_kv)
+            cur_len += 1
+
+        # ── Parse cluster number ─────────────────────────────────────────────
+        raw      = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
+        m        = re.match(r"^\d+", raw)
+        pred_num = min(int(m.group()), max_cluster_id) if m else 0
         predicted_locals.append(pred_num)
 
-        # Extend partial output with prediction and the next segment
-        partial_output = partial_output + f"#{pred_num}" + segments[i + 1]
+        # ── Extend KV with [segments[i+1] + '#'] for next MASK ──────────────
+        if i + 1 < n_masks:
+            chunk     = segments[i + 1] + "#"
+            chunk_ids = tokenizer.encode(chunk, add_special_tokens=False)
 
-    return partial_output, predicted_locals
+            if chunk_ids:
+                chunk_t = torch.tensor([chunk_ids], device=device)
+                mask    = torch.ones(1, cur_len + len(chunk_ids), device=device)
+                logits, kv = _model_step(model, chunk_t, mask, cur_kv)
+                kv_len     = cur_len + len(chunk_ids)
+            else:
+                logits, kv, kv_len = cur_logits, cur_kv, cur_len
+
+    # ── Reconstruct output string ────────────────────────────────────────────
+    parts = [segments[0]]
+    for j, num in enumerate(predicted_locals):
+        parts.append(f"#{num}")
+        parts.append(segments[j + 1])
+
+    return "".join(parts), predicted_locals
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +164,7 @@ def controlled_inference(
 def run_inference_on_examples(
     model,
     tokenizer,
-    examples: list,                 # list of FrameExample (or dicts with same fields)
+    examples: list,
     device: Optional[torch.device] = None,
     max_cluster_id: int = 200,
     max_seq_length: int = 4096,
@@ -189,15 +177,7 @@ def run_inference_on_examples(
         doc_id, instruction, input (masked), before_mentions, after_mentions,
         before_sent_indices, after_sent_indices
 
-    Returns a list of result dicts:
-    {
-        'doc_id':            str,
-        'before_sent_indices': List[int],
-        'after_sent_indices':  List[int],
-        'before_mentions':   List[dict],  # with 'predicted_local_no' added
-        'after_mentions':    List[dict],  # with 'predicted_local_no' added
-        'output_text':       str,
-    }
+    Returns a list of result dicts with 'predicted_local_no' added to each mention.
     """
     import json
 
@@ -208,7 +188,6 @@ def run_inference_on_examples(
     results = []
 
     for idx, ex in enumerate(examples):
-        # Support both FrameExample objects and plain dicts
         if hasattr(ex, "masked_input"):
             instruction     = ex.instruction
             masked_input    = ex.masked_input
@@ -231,32 +210,23 @@ def run_inference_on_examples(
 
         output_text, predicted_locals = controlled_inference(
             model, tokenizer, instruction, masked_input, device,
-            max_cluster_id, max_seq_length
+            max_cluster_id, max_seq_length,
         )
 
-        # Distribute predicted local numbers back to before / after mentions
         all_mentions = list(before_mentions) + list(after_mentions)
-        for i, m in enumerate(all_mentions):
-            if i < len(predicted_locals):
-                m = dict(m)
-                m["predicted_local_no"] = predicted_locals[i]
-            else:
-                m = dict(m)
-                m["predicted_local_no"] = i    # fallback: unique singleton
+        for k, mention in enumerate(all_mentions):
+            m_dict = dict(mention)
+            m_dict["predicted_local_no"] = predicted_locals[k] if k < len(predicted_locals) else k
+            all_mentions[k] = m_dict
 
         n_before = len(before_mentions)
-        before_with_pred = all_mentions[:n_before]
-        after_with_pred  = all_mentions[n_before:]
-
-        results.append(
-            {
-                "doc_id":              doc_id,
-                "before_sent_indices": before_si,
-                "after_sent_indices":  after_si,
-                "before_mentions":     before_with_pred,
-                "after_mentions":      after_with_pred,
-                "output_text":         output_text,
-            }
-        )
+        results.append({
+            "doc_id":              doc_id,
+            "before_sent_indices": before_si,
+            "after_sent_indices":  after_si,
+            "before_mentions":     all_mentions[:n_before],
+            "after_mentions":      all_mentions[n_before:],
+            "output_text":         output_text,
+        })
 
     return results

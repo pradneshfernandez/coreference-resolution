@@ -10,7 +10,7 @@ build/
 .eggs/
 .installed.cfg
 pip-selfcheck.json
-
+test_inference.py
 # Virtual environments
 .venv/
 venv/
