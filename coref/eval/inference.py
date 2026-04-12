@@ -8,13 +8,22 @@ Key idea (Section 3.3 of the paper):
     prediction back into the context before predicting the next one.
 
 Optimised implementation — incremental KV-cache reuse:
-  • The prefix (instruction + masked_input + first segment + '#') is
-    processed ONCE per frame in a single forward pass.
-  • Each successive MASK only runs the model over the tiny delta tokens
-    (predicted digit(s) + next segment text + next '#'), NOT the full prompt.
-  • Per-MASK prefill cost: O(~10 tokens) instead of O(full_ctx_len).
-  • Uses model() directly instead of model.generate(), which avoids the
-    slow Transformers 5.5 generate() code path entirely.
+  • The prefix (instruction + masked_input + segments[0] + '#') is processed
+    ONCE per frame in a single prefill pass.
+  • Each successive step re-uses that KV cache and only runs the model over
+    single new tokens (greedy digit decoding and segment extension).
+  • Per-MASK work drops from O(full_ctx_len) to O(few tokens).
+
+Unsloth compatibility notes (critical — breaking these crashes the run):
+  • When past_key_values is None  → routes to the STANDARD prefill forward.
+    Multi-token input is OK here. Position_ids are inferred from the mask.
+  • When past_key_values is NOT None → routes to unsloth's patched
+    `LlamaModel_fast_forward_inference_custom`, which:
+        – asserts q_len == 1   (single new token only, no multi-token decode)
+        – REQUIRES explicit position_ids (`.max().item()` on None crashes)
+        – wants attention_mask of shape (1, cache_len + 1)
+  • Therefore every post-prefill step in this file feeds exactly ONE token
+    at a time. Chunk extensions (segments[i+1] + '#') loop token-by-token.
 """
 
 from __future__ import annotations
@@ -26,10 +35,60 @@ import torch
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Forward-pass helpers — two distinct paths for unsloth compatibility
+# ---------------------------------------------------------------------------
+
+def _prefill(model, input_ids, attention_mask):
+    """
+    Initial prefill forward pass.
+
+    Routes through unsloth's standard prefill (past_key_values=None path).
+    Handles multi-token input. Returns (last-position logits, KV cache).
+    """
+    with torch.no_grad():
+        out = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            return_dict=True,
+        )
+    return out.logits[:, -1, :], out.past_key_values
+
+
+def _decode_one(model, token_id: int, past_key_values, cur_len: int, device):
+    """
+    Single-token decode forward pass.
+
+    Routes through unsloth's `LlamaModel_fast_forward_inference_custom`:
+      • input_ids  : shape (1, 1)                — exactly one new token
+      • attention_mask: shape (1, cur_len + 1)   — cache coverage + new token
+      • position_ids  : shape (1, 1), value = cur_len
+      • past_key_values must be non-None
+
+    Returns (last-position logits, updated KV cache).
+    """
+    input_ids      = torch.tensor([[token_id]], device=device)
+    attention_mask = torch.ones(1, cur_len + 1, dtype=torch.long, device=device)
+    position_ids   = torch.tensor([[cur_len]], dtype=torch.long, device=device)
+
+    with torch.no_grad():
+        out = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+            use_cache=True,
+            return_dict=True,
+        )
+    return out.logits[:, -1, :], out.past_key_values
+
+
+# ---------------------------------------------------------------------------
+# Prompt construction
 # ---------------------------------------------------------------------------
 
 def _build_prefix_str(tokenizer, instruction: str, masked_input: str) -> str:
+    """Apply the chat template to produce the constant per-frame prefix."""
     messages = [
         {"role": "system", "content": instruction},
         {"role": "user",   "content": masked_input},
@@ -42,6 +101,7 @@ def _build_prefix_str(tokenizer, instruction: str, masked_input: str) -> str:
 
 
 def _tokenize_left_truncated(tokenizer, text: str, max_len: int, device):
+    """Tokenise with left-side truncation so the tail (most recent context) is kept."""
     orig = tokenizer.truncation_side
     tokenizer.truncation_side = "left"
     enc = tokenizer(
@@ -52,31 +112,6 @@ def _tokenize_left_truncated(tokenizer, text: str, max_len: int, device):
     ).to(device)
     tokenizer.truncation_side = orig
     return enc
-
-
-def _model_step(model, input_ids, attention_mask, past_key_values):
-    """One forward pass; returns (logits at last position, updated past_key_values)."""
-    # Unsloth's patched forward requires explicit position_ids when past_key_values
-    # is provided — it cannot infer them from the KV cache length on its own.
-    if past_key_values is not None:
-        kv_len = past_key_values[0][0].shape[2]
-        new_len = input_ids.shape[1]
-        position_ids = torch.arange(
-            kv_len, kv_len + new_len, device=input_ids.device
-        ).unsqueeze(0)
-    else:
-        position_ids = None
-
-    with torch.no_grad():
-        out = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-            use_cache=True,
-            return_dict=True,
-        )
-    return out.logits[:, -1, :], out.past_key_values
 
 
 # ---------------------------------------------------------------------------
@@ -95,12 +130,15 @@ def controlled_inference(
     """
     Controlled inference with incremental KV-cache reuse.
 
-    1. Tokenise [prefix + segments[0] + '#'] and prime the KV cache once.
-    2. For each MASK i:
-         a. Greedy-decode up to 4 digit tokens from the last logit vector.
-         b. Record predicted cluster number.
-         c. Process [segments[i+1] + '#'] incrementally (tiny delta).
-    3. Reconstruct and return the output string.
+    Steps:
+      1. Tokenise [prefix + segments[0] + '#'] and run one prefill pass.
+      2. For each MASK i:
+           a. Greedy-decode up to 4 digit tokens (one `_decode_one` call each)
+              from the last logit vector; stop at the first non-digit.
+           b. Record the predicted cluster number.
+           c. If more MASKs remain, tokenise [segments[i+1] + '#'] and feed
+              those tokens ONE AT A TIME through `_decode_one`.
+      3. Reconstruct and return the output string.
     """
     segments = re.split(r"[#@]MASK", masked_input)
     n_masks = len(segments) - 1
@@ -108,7 +146,7 @@ def controlled_inference(
     if n_masks == 0:
         return masked_input, []
 
-    # ── Prime KV with [prefix + segments[0] + '#'] ──────────────────────────
+    # ── Step 1: prefill [prefix + segments[0] + '#'] ────────────────────────
     prefix_str  = _build_prefix_str(tokenizer, instruction, masked_input)
     initial_str = prefix_str + segments[0] + "#"
 
@@ -116,51 +154,41 @@ def controlled_inference(
         tokenizer, initial_str, max_seq_length - 4, device
     )
 
-    logits, kv = _model_step(model, enc["input_ids"], enc["attention_mask"], None)
+    logits, kv = _prefill(model, enc["input_ids"], enc["attention_mask"])
     kv_len = enc["input_ids"].shape[1]
 
     predicted_locals: List[int] = []
 
     for i in range(n_masks):
-        # ── Greedy-decode up to 4 digit tokens ──────────────────────────────
-        pred_ids:   List[int] = []
-        cur_kv     = kv
-        cur_len    = kv_len
-        cur_logits = logits
+        # ── Step 2a: greedy-decode up to 4 digit tokens ─────────────────────
+        pred_ids: List[int] = []
 
         for _ in range(4):
-            next_id  = int(cur_logits.argmax(dim=-1).item())
+            next_id  = int(logits.argmax(dim=-1).item())
             next_tok = tokenizer.decode([next_id]).strip()
 
             if not re.match(r"^\d", next_tok):
-                break
+                break                          # non-digit → stop
 
             pred_ids.append(next_id)
-            tok_t = torch.tensor([[next_id]], device=device)
-            mask  = torch.ones(1, cur_len + 1, device=device)
-            cur_logits, cur_kv = _model_step(model, tok_t, mask, cur_kv)
-            cur_len += 1
+            logits, kv = _decode_one(model, next_id, kv, kv_len, device)
+            kv_len += 1
 
-        # ── Parse cluster number ─────────────────────────────────────────────
+        # ── Step 2b: parse the decoded cluster number ───────────────────────
         raw      = tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
         m        = re.match(r"^\d+", raw)
         pred_num = min(int(m.group()), max_cluster_id) if m else 0
         predicted_locals.append(pred_num)
 
-        # ── Extend KV with [segments[i+1] + '#'] for next MASK ──────────────
+        # ── Step 2c: extend KV one token at a time with [seg[i+1] + '#'] ────
         if i + 1 < n_masks:
             chunk     = segments[i + 1] + "#"
             chunk_ids = tokenizer.encode(chunk, add_special_tokens=False)
+            for tok_id in chunk_ids:
+                logits, kv = _decode_one(model, tok_id, kv, kv_len, device)
+                kv_len += 1
 
-            if chunk_ids:
-                chunk_t = torch.tensor([chunk_ids], device=device)
-                mask    = torch.ones(1, cur_len + len(chunk_ids), device=device)
-                logits, kv = _model_step(model, chunk_t, mask, cur_kv)
-                kv_len     = cur_len + len(chunk_ids)
-            else:
-                logits, kv, kv_len = cur_logits, cur_kv, cur_len
-
-    # ── Reconstruct output string ────────────────────────────────────────────
+    # ── Reconstruct the output string ────────────────────────────────────────
     parts = [segments[0]]
     for j, num in enumerate(predicted_locals):
         parts.append(f"#{num}")
