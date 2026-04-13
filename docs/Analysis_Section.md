@@ -55,3 +55,16 @@ By updating its internal predictive map over the masked frame, the model accurat
 `"राहुल आज बाज़ार गया था। </z>0 सेब ख़रीदने थे क्योंकि <m> उसकी </m>0 माँ को सेब पसंद हैं।"`
 
 This robust capability to systematically trace both explicit boundaries (`<m> ... </m>`) and hidden syntactical omissions (`</z>`) onto unified cluster integers defines the efficiency curve charted in our quantitative scores, specifically validating the approach for morphologically complex Indian languages.
+
+## 4.5 Error Analysis: Where and Why the Model Fails
+
+Despite significantly outperforming traditional encoder architectures (often averaging ~65% F1 for these Indian languages), the ~72.85% CoNLL score leaves an implicit error margin. The model primarily fails across three specific linguistic and architectural challenges:
+
+1. **Agglutinative Morphology (Specifically in Tamil):** 
+   Tamil syntax frequently fuses multiple grammatical markers (case, tense, person, number) onto a single root word. Standard LLM tokenizers aggressively fractionate these complex words into meaningless subwords. Because the structural "anchor" is destroyed during tokenization, the model's predictive map occasionally struggles to align pronouns to these fragmented entities.
+
+2. **Ambiguity in Zero Mentions (Pro-Drop Confusion):** 
+   When resolving a dropped pronoun (`</z>`), the model is forced to infer context. If a sentence introduces two logical entities of the *same* gender close together, the model occasionally defaults to merging the cluster with the structurally closest entity rather than tracking the wider narrative flow.
+
+3. **Cross-Frame Drift ("Chain Breakage"):** 
+   To bypass the LLM's static context window limit, long documents are evaluated in overlapping narrative chunks (frames). If a coreferential entity ceases to be mentioned for several paragraphs and then reappears outside of the current active frame span, the cross-frame postprocessor (Algorithm 1) sometimes fails to link it back to its original global ID, accidentally spawning a brand new, disconnected cluster.
