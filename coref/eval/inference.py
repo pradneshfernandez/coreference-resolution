@@ -10,20 +10,12 @@ Key idea (Section 3.3 of the paper):
 Optimised implementation — incremental KV-cache reuse:
   • The prefix (instruction + masked_input + segments[0] + '#') is processed
     ONCE per frame in a single prefill pass.
-  • Each successive step re-uses that KV cache and only runs the model over
-    single new tokens (greedy digit decoding and segment extension).
-  • Per-MASK work drops from O(full_ctx_len) to O(few tokens).
-
-Unsloth compatibility notes (critical — breaking these crashes the run):
-  • When past_key_values is None  → routes to the STANDARD prefill forward.
-    Multi-token input is OK here. Position_ids are inferred from the mask.
-  • When past_key_values is NOT None → routes to unsloth's patched
-    `LlamaModel_fast_forward_inference_custom`, which:
-        – asserts q_len == 1   (single new token only, no multi-token decode)
-        – REQUIRES explicit position_ids (`.max().item()` on None crashes)
-        – wants attention_mask of shape (1, cache_len + 1)
-  • Therefore every post-prefill step in this file feeds exactly ONE token
-    at a time. Chunk extensions (segments[i+1] + '#') loop token-by-token.
+  • Digit decoding (1–4 tokens per MASK) feeds one token at a time.
+  • Chunk extension (segment text between MASKs) is batched into a single
+    multi-token forward pass — typically 50–200× fewer calls than one-at-a-time.
+  • If the runtime (e.g. unsloth) rejects multi-token decode (assert q_len==1),
+    the first failure is caught and all subsequent chunks fall back to
+    single-token mode automatically.
 """
 
 from __future__ import annotations
@@ -34,15 +26,17 @@ from typing import List, Optional, Tuple
 import torch
 
 
+# Module-level flag: start with batched chunk extension, fall back if needed.
+_use_batched_chunks: bool = True
+
+
 # ---------------------------------------------------------------------------
-# Forward-pass helpers — two distinct paths for unsloth compatibility
+# Forward-pass helpers
 # ---------------------------------------------------------------------------
 
 def _prefill(model, input_ids, attention_mask):
     """
-    Initial prefill forward pass.
-
-    Routes through unsloth's standard prefill (past_key_values=None path).
+    Initial prefill forward pass (past_key_values=None).
     Handles multi-token input. Returns (last-position logits, KV cache).
     """
     with torch.no_grad():
@@ -58,13 +52,6 @@ def _prefill(model, input_ids, attention_mask):
 def _decode_one(model, token_id: int, past_key_values, cur_len: int, device):
     """
     Single-token decode forward pass.
-
-    Routes through unsloth's `LlamaModel_fast_forward_inference_custom`:
-      • input_ids  : shape (1, 1)                — exactly one new token
-      • attention_mask: shape (1, cur_len + 1)   — cache coverage + new token
-      • position_ids  : shape (1, 1), value = cur_len
-      • past_key_values must be non-None
-
     Returns (last-position logits, updated KV cache).
     """
     input_ids      = torch.tensor([[token_id]], device=device)
@@ -81,6 +68,52 @@ def _decode_one(model, token_id: int, past_key_values, cur_len: int, device):
             return_dict=True,
         )
     return out.logits[:, -1, :], out.past_key_values
+
+
+def _extend_kv_chunk(model, chunk_ids, kv, kv_len, device):
+    """
+    Feed a chunk of tokens into the KV cache.
+
+    Tries a single batched multi-token forward first (standard transformers
+    path — much faster). If the runtime asserts q_len==1 (unsloth fast path),
+    falls back to single-token mode for this call AND flips the module flag
+    so all future calls skip the attempt.
+
+    Returns (logits, updated_kv, new_kv_len).
+    """
+    global _use_batched_chunks
+
+    n = len(chunk_ids)
+    if n == 0:
+        return None, kv, kv_len
+
+    # ── Try batched multi-token extension ───────────────────────────────
+    if _use_batched_chunks and n > 1:
+        try:
+            chunk_t = torch.tensor([chunk_ids], device=device)
+            attn    = torch.ones(1, kv_len + n, dtype=torch.long, device=device)
+            pos     = torch.arange(kv_len, kv_len + n,
+                                   dtype=torch.long, device=device).unsqueeze(0)
+            with torch.no_grad():
+                out = model(
+                    input_ids=chunk_t,
+                    attention_mask=attn,
+                    past_key_values=kv,
+                    position_ids=pos,
+                    use_cache=True,
+                    return_dict=True,
+                )
+            return out.logits[:, -1, :], out.past_key_values, kv_len + n
+        except (AssertionError, RuntimeError):
+            _use_batched_chunks = False
+            # Fall through to single-token path
+
+    # ── Single-token fallback ───────────────────────────────────────────
+    logits = None
+    for tok_id in chunk_ids:
+        logits, kv = _decode_one(model, tok_id, kv, kv_len, device)
+        kv_len += 1
+    return logits, kv, kv_len
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +170,7 @@ def controlled_inference(
               from the last logit vector; stop at the first non-digit.
            b. Record the predicted cluster number.
            c. If more MASKs remain, tokenise [segments[i+1] + '#'] and feed
-              those tokens ONE AT A TIME through `_decode_one`.
+              them through `_extend_kv_chunk` (batched or single-token).
       3. Reconstruct and return the output string.
     """
     segments = re.split(r"[#@]MASK", masked_input)
@@ -180,13 +213,13 @@ def controlled_inference(
         pred_num = min(int(m.group()), max_cluster_id) if m else 0
         predicted_locals.append(pred_num)
 
-        # ── Step 2c: extend KV one token at a time with [seg[i+1] + '#'] ────
+        # ── Step 2c: extend KV with [seg[i+1] + '#'] (batched when possible) ──
         if i + 1 < n_masks:
             chunk     = segments[i + 1] + "#"
             chunk_ids = tokenizer.encode(chunk, add_special_tokens=False)
-            for tok_id in chunk_ids:
-                logits, kv = _decode_one(model, tok_id, kv, kv_len, device)
-                kv_len += 1
+            logits, kv, kv_len = _extend_kv_chunk(
+                model, chunk_ids, kv, kv_len, device
+            )
 
     # ── Reconstruct the output string ────────────────────────────────────────
     parts = [segments[0]]
