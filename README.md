@@ -44,14 +44,16 @@ Implementation of **CorefInst** (TACL 2026) for Hindi, Tamil, and Bengali using 
 
 ### Option A — Google Colab (recommended)
 
-1. Package the code:
+1. Open `CorefInst_Colab.ipynb` directly in Colab from the GitHub repository.
+2. Clone the repository in the notebook's first cell to set up the environment:
    ```bash
-   python package_for_colab.py
+   !git clone https://github.com/pradneshfernandez/coreference-resolution.git
+   %cd coreference-resolution
+   !pip install -r requirements.txt
+   !pip install "unsloth[colab-new]"
    ```
-2. Upload `corefinst_code.zip` and `transmucores_data.tar.gz` to Google Drive.
-3. Open `CorefInst_Colab.ipynb` in Colab and **Run All**.
-
-The notebook auto-detects the GPU (T4 or A100) and applies the correct hardware preset.
+3. Upload `transmucores_data.tar.gz` to your Colab workspace or mount Google Drive if stored there.
+4. Execute the notebook cells. The system auto-detects the GPU (T4 or A100) and applies the appropriate hardware preset.
 
 ---
 
