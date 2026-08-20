@@ -5,8 +5,10 @@ Supports two backends:
   • unsloth  — faster, memory-efficient, quantization-aware LoRA (preferred)
   • standard — HuggingFace transformers + PEFT + bitsandbytes (fallback)
 
-The backend is selected automatically: if `unsloth` is importable it is used;
-otherwise the standard stack is used.
+The backend is selected automatically: unsloth is used when it is importable
+AND a CUDA device is present; otherwise the standard stack is used. On CPU,
+4-bit quantization and flash-attention are also switched off, since both are
+CUDA-only — so the same config file works on a laptop and on a GPU.
 """
 
 from __future__ import annotations
@@ -27,6 +29,27 @@ _LORA_TARGETS_LLAMA = [
 ]
 _LORA_TARGETS_GEMMA = _LORA_TARGETS_LLAMA
 _LORA_TARGETS_MISTRAL = _LORA_TARGETS_LLAMA
+
+
+def cuda_available() -> bool:
+    return bool(torch.cuda.is_available())
+
+
+def _resolve_device_settings(load_in_4bit: bool) -> Tuple[bool, dict]:
+    """
+    Reconcile the requested precision with the hardware actually present.
+
+    bitsandbytes 4-bit quantisation and device_map='auto' offloading both
+    require CUDA; on a CPU-only box they either raise or silently produce a
+    model that cannot run. Fall back to plain fp32 on CPU.
+    """
+    if cuda_available():
+        return load_in_4bit, {"device_map": "auto", "torch_dtype": torch.bfloat16}
+
+    if load_in_4bit:
+        print("[info] No CUDA device found — disabling 4-bit quantization "
+              "and loading in fp32 on CPU.")
+    return False, {"device_map": None, "torch_dtype": torch.float32}
 
 
 def _infer_target_modules(model_name: str) -> List[str]:
@@ -95,6 +118,8 @@ def _load_standard(
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"    # causal LM padding
 
+    load_in_4bit, device_kwargs = _resolve_device_settings(load_in_4bit)
+
     bnb_config = None
     if load_in_4bit:
         bnb_config = BitsAndBytesConfig(
@@ -107,9 +132,14 @@ def _load_standard(
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         quantization_config=bnb_config,
-        device_map="auto",
         trust_remote_code=True,
-        attn_implementation="flash_attention_2" if _flash_attn_available() else "eager",
+        # flash-attn is CUDA-only; 'eager' is the portable fallback.
+        attn_implementation=(
+            "flash_attention_2"
+            if (cuda_available() and _flash_attn_available())
+            else "eager"
+        ),
+        **device_kwargs,
     )
 
     if load_in_4bit:
@@ -126,6 +156,22 @@ def _load_standard(
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     return model, tokenizer
+
+
+def select_backend(backend: str) -> bool:
+    """Decide whether to use unsloth. unsloth requires CUDA, so 'auto' never
+    picks it on a CPU-only machine."""
+    if backend == "unsloth":
+        return True
+    if backend == "standard":
+        return False
+    if not cuda_available():
+        return False
+    try:
+        import unsloth  # type: ignore  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def _flash_attn_available() -> bool:
@@ -170,15 +216,7 @@ def load_model_and_tokenizer(
     if target_modules is None:
         target_modules = _infer_target_modules(model_name)
 
-    use_unsloth = False
-    if backend == "auto":
-        try:
-            import unsloth  # type: ignore  # noqa: F401
-            use_unsloth = True
-        except ImportError:
-            use_unsloth = False
-    elif backend == "unsloth":
-        use_unsloth = True
+    use_unsloth = select_backend(backend)
 
     print(f"Backend: {'unsloth' if use_unsloth else 'standard HF+PEFT'}")
     print(f"Model  : {model_name}")
@@ -209,19 +247,10 @@ def load_for_inference(
     If *base_model_name* is given, loads base + adapter separately via PEFT.
     Otherwise loads a fully-merged checkpoint.
     """
-    use_unsloth = False
-    if backend == "auto":
-        try:
-            import unsloth  # type: ignore  # noqa: F401
-            use_unsloth = True
-        except ImportError:
-            pass
-    elif backend == "unsloth":
-        use_unsloth = True
+    use_unsloth = select_backend(backend)
 
     if use_unsloth:
         from unsloth import FastLanguageModel  # type: ignore
-        import json as _json
 
         # Detect whether checkpoint_path is a LoRA adapter directory or a full model.
         # A LoRA adapter directory has adapter_config.json; a full model has config.json
@@ -273,6 +302,8 @@ def load_for_inference(
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        load_in_4bit, device_kwargs = _resolve_device_settings(load_in_4bit)
+
         bnb_config = None
         if load_in_4bit:
             bnb_config = BitsAndBytesConfig(
@@ -282,21 +313,41 @@ def load_for_inference(
                 bnb_4bit_use_double_quant=True,
             )
 
+        # A LoRA checkpoint has no weights of its own — the base model it was
+        # trained on must be loaded first. Read it from adapter_config.json when
+        # the caller did not pass one explicitly.
+        if base_model_name is None:
+            base_model_name = _base_model_from_adapter(checkpoint_path)
+
         if base_model_name:
             base = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
                 quantization_config=bnb_config,
-                device_map="auto",
                 trust_remote_code=True,
+                **device_kwargs,
             )
             model = PeftModel.from_pretrained(base, checkpoint_path)
         else:
             model = AutoModelForCausalLM.from_pretrained(
                 checkpoint_path,
                 quantization_config=bnb_config,
-                device_map="auto",
                 trust_remote_code=True,
+                **device_kwargs,
             )
 
         model.eval()
         return model, tokenizer
+
+
+def _base_model_from_adapter(checkpoint_path: str) -> Optional[str]:
+    """Return the base model recorded in a PEFT adapter_config.json, if any."""
+    import json
+
+    cfg_path = os.path.join(checkpoint_path, "adapter_config.json")
+    if not os.path.isfile(cfg_path):
+        return None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            return json.load(fh).get("base_model_name_or_path")
+    except (OSError, ValueError):
+        return None
