@@ -194,21 +194,6 @@ def train(
             "trl is required for training. Install with: pip install trl"
         )
 
-    # DataCollatorForCompletionOnlyLM moved across TRL versions — try all
-    # locations, and accept that recent releases dropped it entirely.
-    DataCollatorForCompletionOnlyLM = None
-    for _mod in ("trl", "trl.trainer", "trl.trainer.utils", "trl.data_utils"):
-        try:
-            import importlib
-            _m = importlib.import_module(_mod)
-        except ImportError:
-            continue
-        DataCollatorForCompletionOnlyLM = getattr(
-            _m, "DataCollatorForCompletionOnlyLM", None
-        )
-        if DataCollatorForCompletionOnlyLM is not None:
-            break
-
     # Identify the response template so we only compute loss on output tokens.
     response_template = _find_response_template(tokenizer)
 
@@ -233,15 +218,26 @@ def train(
         if key in _sft_params:
             trainer_kwargs[key] = value
 
-    if response_template and DataCollatorForCompletionOnlyLM is not None:
-        trainer_kwargs["data_collator"] = DataCollatorForCompletionOnlyLM(
-            response_template=response_template,
-            tokenizer=tokenizer,
+    # Loss must be computed on the assistant answer only. TRL's own collator for
+    # this moved modules repeatedly and newer releases removed it, so the local
+    # implementation in coref.modeling.collator is used instead — same masking,
+    # no version coupling.
+    if not response_template:
+        raise RuntimeError(
+            "Could not identify the assistant response template for "
+            f"{model_name!r}. Without it, loss would be computed over the "
+            "prompt as well, which does not train the CorefInst task. Add the "
+            "model's template to _find_response_template() in "
+            "coref/modeling/train.py before training."
         )
-    else:
-        print("[warn] Completion-only collator unavailable "
-              f"(template={'found' if response_template else 'not found'}) — "
-              "computing loss on all tokens, including the prompt.")
+
+    from coref.modeling.collator import CompletionOnlyCollator
+
+    trainer_kwargs["data_collator"] = CompletionOnlyCollator(
+        response_template=response_template,
+        tokenizer=tokenizer,
+    )
+    print(f"[info] Completion-only loss enabled (template={response_template!r}).")
 
     trainer = SFTTrainer(**trainer_kwargs)
 
