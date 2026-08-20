@@ -12,6 +12,18 @@ primary metric reported in the CorefInst paper (and in CorefUD shared tasks).
 
 Inputs are dicts of {cluster_id: frozenset_of_mention_position_keys}.
 Mention position keys are (sent_idx, start_tok, end_tok) tuples.
+
+Comparability caveat
+--------------------
+This is an independent implementation, not the official CorefUD scorer
+(`coval` / `corefud-scorer`). It differs from the shared-task setup in at least
+one way that moves the numbers: singleton clusters are kept and therefore count
+towards B³ and CEAFe, whereas the CorefUD evaluation applies its own singleton
+policy. Scores produced here are internally consistent — fine for comparing our
+own systems, configurations, and baselines against each other — but they should
+NOT be placed in the same table as published CorefUD/CorefInst figures as
+though they were measured the same way. To make that comparison, re-score the
+CoNLL files written by `write_conll_predictions` with the official scorer.
 """
 
 from __future__ import annotations
@@ -29,9 +41,12 @@ Clusters   = Dict[int, Set[MentionKey]]
 # Precision / Recall / F1 helpers
 # ---------------------------------------------------------------------------
 
-def _prf(num: float, denom_p: float, denom_r: float) -> Tuple[float, float, float]:
-    p = num / denom_p if denom_p > 0 else 0.0
-    r = num / denom_r if denom_r > 0 else 0.0
+def _prf(
+    num_p: float, denom_p: float, num_r: float, denom_r: float
+) -> Tuple[float, float, float]:
+    """Precision and recall have *separate* numerators (MUC is not symmetric)."""
+    p = num_p / denom_p if denom_p > 0 else 0.0
+    r = num_r / denom_r if denom_r > 0 else 0.0
     f = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
     return p, r, f
 
@@ -40,7 +55,17 @@ def _prf(num: float, denom_p: float, denom_r: float) -> Tuple[float, float, floa
 # MUC metric
 # ---------------------------------------------------------------------------
 
-def _muc_partition_count(cluster: Set[MentionKey], other_clusters: Clusters) -> int:
+def _mention_index(clusters: Clusters) -> Dict[MentionKey, int]:
+    """mention key → cluster id, built once so lookups are O(1) rather than a
+    scan over every cluster (evaluation is otherwise quadratic in cluster count)."""
+    return {mkey: cid for cid, cset in clusters.items() for mkey in cset}
+
+
+def _muc_partition_count(
+    cluster: Set[MentionKey],
+    other_clusters: Clusters,
+    other_index: Optional[Dict[MentionKey, int]] = None,
+) -> int:
     """
     Number of partitions of *cluster* induced by *other_clusters*.
 
@@ -48,17 +73,17 @@ def _muc_partition_count(cluster: Set[MentionKey], other_clusters: Clusters) -> 
     least one mention from *cluster*.  Mentions not found in any other cluster
     each form their own singleton partition (counts as +1 per orphan).
     """
+    if other_index is None:
+        other_index = _mention_index(other_clusters)
+
     seen: Set[int] = set()
     orphans = 0
     for mkey in cluster:
-        found = False
-        for cid, cset in other_clusters.items():
-            if mkey in cset:
-                seen.add(cid)
-                found = True
-                break
-        if not found:
+        cid = other_index.get(mkey)
+        if cid is None:
             orphans += 1
+        else:
+            seen.add(cid)
     return len(seen) + orphans
 
 
@@ -70,6 +95,9 @@ def muc_score(
 
     Returns (precision, recall, F1).
     """
+    gold_index = _mention_index(gold)
+    pred_index = _mention_index(pred)
+
     # Recall: for each gold cluster, count links partitioned by predicted
     recall_num   = 0.0
     recall_denom = 0.0
@@ -77,7 +105,7 @@ def muc_score(
         size = len(g_cluster)
         if size < 2:
             continue   # skip singletons (they have 0 links)
-        k = _muc_partition_count(g_cluster, pred)
+        k = _muc_partition_count(g_cluster, pred, pred_index)
         recall_num   += size - k
         recall_denom += size - 1
 
@@ -88,19 +116,26 @@ def muc_score(
         size = len(p_cluster)
         if size < 2:
             continue
-        k = _muc_partition_count(p_cluster, gold)
+        k = _muc_partition_count(p_cluster, gold, gold_index)
         prec_num   += size - k
         prec_denom += size - 1
 
-    return _prf(recall_num, prec_denom, recall_denom)
+    return _prf(prec_num, prec_denom, recall_num, recall_denom)
 
 
 # ---------------------------------------------------------------------------
 # B³ metric
 # ---------------------------------------------------------------------------
 
-def _get_cluster_of(mkey: MentionKey, clusters: Clusters) -> Optional[Set[MentionKey]]:
+def _get_cluster_of(
+    mkey: MentionKey,
+    clusters: Clusters,
+    index: Optional[Dict[MentionKey, int]] = None,
+) -> Optional[Set[MentionKey]]:
     """Return the cluster containing mkey, or None if not found."""
+    if index is not None:
+        cid = index.get(mkey)
+        return clusters[cid] if cid is not None else None
     for cset in clusters.values():
         if mkey in cset:
             return cset
@@ -119,13 +154,16 @@ def b3_score(
     for cset in gold.values():
         all_mentions |= cset
 
+    gold_index = _mention_index(gold)
+    pred_index = _mention_index(pred)
+
     prec_sum = 0.0
     rec_sum  = 0.0
     count    = 0
 
     for mkey in all_mentions:
-        g_cluster = _get_cluster_of(mkey, gold) or {mkey}
-        p_cluster = _get_cluster_of(mkey, pred) or {mkey}
+        g_cluster = _get_cluster_of(mkey, gold, gold_index) or {mkey}
+        p_cluster = _get_cluster_of(mkey, pred, pred_index) or {mkey}
         overlap = len(g_cluster & p_cluster)
 
         prec_sum += overlap / len(p_cluster)
@@ -274,19 +312,22 @@ def evaluate_documents(
     ce_match  = ce_den_p = ce_den_r = 0.0
 
     for gold, pred in zip(gold_clusters_list, pred_clusters_list):
+        gold_index = _mention_index(gold)
+        pred_index = _mention_index(pred)
+
         # MUC numerators/denominators
         for cid, g_cluster in gold.items():
             s = len(g_cluster)
             if s < 2:
                 continue
-            k = _muc_partition_count(g_cluster, pred)
+            k = _muc_partition_count(g_cluster, pred, pred_index)
             muc_num_r += s - k
             muc_den_r += s - 1
         for cid, p_cluster in pred.items():
             s = len(p_cluster)
             if s < 2:
                 continue
-            k = _muc_partition_count(p_cluster, gold)
+            k = _muc_partition_count(p_cluster, gold, gold_index)
             muc_num_p += s - k
             muc_den_p += s - 1
 
@@ -295,8 +336,8 @@ def evaluate_documents(
         for cset in gold.values():
             all_m |= cset
         for mkey in all_m:
-            gc = _get_cluster_of(mkey, gold) or {mkey}
-            pc = _get_cluster_of(mkey, pred) or {mkey}
+            gc = _get_cluster_of(mkey, gold, gold_index) or {mkey}
+            pc = _get_cluster_of(mkey, pred, pred_index) or {mkey}
             ov = len(gc & pc)
             b3_sum_p += ov / len(pc)
             b3_sum_r += ov / len(gc)
