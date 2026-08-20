@@ -261,6 +261,7 @@ def create_frame_examples(
     instruction_id: int = 5,
     max_tokens_per_frame: int = 256,
     skip_empty: bool = True,
+    min_mentions: int = 1,
 ) -> List[FrameExample]:
     """
     Convert a Document into a list of FrameExample training instances.
@@ -274,6 +275,8 @@ def create_frame_examples(
         instruction_id       — which instruction set to use (1–5; default 5)
         max_tokens_per_frame — approximate token budget per frame
         skip_empty           — skip examples with no mentions in either frame
+        min_mentions         — drop examples with fewer than this many mentions
+                               across both frames (config: min_mentions_per_example)
     """
     if not doc.sentences:
         return []
@@ -336,8 +339,9 @@ def create_frame_examples(
             after_output_parts.append(o_txt)
             after_mentions_info.extend(minfo)
 
-        # Skip examples with no mentions if requested
-        if skip_empty and not before_mentions_info and not after_mentions_info:
+        # Skip examples with too few mentions to be worth training on
+        n_mentions = len(before_mentions_info) + len(after_mentions_info)
+        if skip_empty and n_mentions < max(min_mentions, 1):
             continue
 
         masked_input = " ".join(before_masked_parts) + " [MID] " + " ".join(after_masked_parts)
