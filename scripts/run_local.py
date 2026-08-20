@@ -10,7 +10,9 @@ rather than halfway through a paid GPU session.
 Stages
 ------
   check     Environment + dataset sanity check. Pure Python; no torch needed.
-  prepare   Build processed_data/{train,dev,test}.jsonl (optionally a subset).
+  prepare   Build frame examples from a sample and verify they are well formed.
+            Writes to <output-dir>/processed_sample/, never to the dataset the
+            trainer reads — use scripts/prepare_data.py to build that.
   dryrun    Full pipeline with a *stub* predictor instead of an LLM. Proves the
             postprocessor and scorer work end to end. No torch needed.
   baseline  Score the all-singletons / all-one-cluster / MFE baselines. These
@@ -163,14 +165,23 @@ def stage_check(cfg: dict, config_path: str, max_docs: Optional[int]) -> bool:
 # Stage: prepare
 # ---------------------------------------------------------------------------
 
-def stage_prepare(cfg: dict, max_docs: Optional[int]) -> bool:
-    """Build the JSONL files the trainer reads."""
+def stage_prepare(cfg: dict, max_docs: Optional[int], output_dir: str) -> bool:
+    """Build frame examples and check they are well formed.
+
+    Writes into the local-run output directory, never into
+    cfg['data']['output_dir']. This stage runs on a handful of documents, and
+    the trainer reads the real path — clobbering it here would leave a GPU box
+    training on six documents with nothing to indicate it. Use
+    `scripts/prepare_data.py` to build the dataset for real.
+    """
     _banner("Stage 2/4 — build frame examples")
 
     from coref.data.dataset_builder import build_examples, save_jsonl
 
-    out_dir = cfg["data"]["output_dir"]
+    out_dir = os.path.join(output_dir, "processed_sample")
     os.makedirs(out_dir, exist_ok=True)
+    print(f"  writing samples to {out_dir}/ "
+          f"(the trainer's own {cfg['data']['output_dir']}/ is left alone)")
 
     instr_id = cfg["preprocessing"]["instruction_id"]
     max_tokens = cfg["preprocessing"]["max_tokens_per_frame"]
@@ -622,7 +633,7 @@ def main() -> int:
         if stage == "check":
             ok = stage_check(cfg, args.config, check_max_docs)
         elif stage == "prepare":
-            ok = stage_prepare(cfg, max_docs)
+            ok = stage_prepare(cfg, max_docs, args.output_dir)
         elif stage == "dryrun":
             ok = stage_dryrun(cfg, max_docs, max_frames, args.output_dir)
         elif stage == "baseline":
