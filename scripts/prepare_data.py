@@ -34,6 +34,7 @@ def main(config_path: str = "config.yaml") -> None:
 
     instr_id   = cfg["preprocessing"]["instruction_id"]
     max_tokens = cfg["preprocessing"]["max_tokens_per_frame"]
+    min_ments  = cfg["preprocessing"].get("min_mentions_per_example", 1)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -47,7 +48,9 @@ def main(config_path: str = "config.yaml") -> None:
         docs = load_documents(data_root, split=split, languages=languages)
         print(f"  Total documents loaded: {len(docs)}")
 
-        examples = build_examples(docs, instruction_id=instr_id, max_tokens_per_frame=max_tokens)
+        examples = build_examples(docs, instruction_id=instr_id,
+                                  max_tokens_per_frame=max_tokens,
+                                  min_mentions=min_ments)
         print(f"  Total frame examples: {len(examples)}")
 
         out_path = os.path.join(output_dir, f"{out_name}.jsonl")

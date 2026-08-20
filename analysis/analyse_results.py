@@ -111,8 +111,7 @@ def print_cluster_distribution(gold_list: List[Dict], pred_list: List[Dict],
     for sz in range(1, max_size + 1):
         g = gold_dist.get(sz, 0)
         p = pred_dist.get(sz, 0)
-        print(_row([f"={sz}" if sz < 10 else f"≥10",
-                    str(g), str(p), f"{p-g:+d}"], [6, 8, 8, 8]))
+        print(_row([f"={sz}", str(g), str(p), f"{p-g:+d}"], [6, 8, 8, 8]))
     if max(all_sizes, default=0) > 10:
         g = sum(v for k, v in gold_dist.items() if k > 10)
         p = sum(v for k, v in pred_dist.items() if k > 10)
@@ -166,7 +165,7 @@ def error_analysis(gold_list: List[Dict], pred_list: List[Dict],
                     perfect += 1
 
     print(f"\n  Error analysis — {label}")
-    print(f"  Gold clusters (size≥2): {total_gold}")
+    print(f"  Gold clusters total:    {total_gold}")
     print(f"  Pred clusters total:    {total_pred}")
     print(f"  Perfect matches:        {perfect}")
     print(f"  Over-merged pred:       {over_merge}  (one pred spans multiple gold clusters)")
@@ -222,10 +221,33 @@ def print_ablation_table(ablation_dir: str, names: List[str]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def load_predictions(path: str) -> Dict[str, List[Dict]]:
+    """
+    Load predictions.json (written by run_inference.py) and rebuild the
+    {cluster_id: set_of_mention_keys} structure the analyses below expect.
+
+    Returns {language: [ (gold_clusters, pred_clusters), … ]} flattened into
+    two parallel lists per language, plus an 'overall' bucket.
+    """
+    from coref.eval.postprocessor import clusters_from_json
+
+    with open(path) as fh:
+        per_doc = json.load(fh)
+
+    buckets: Dict[str, List[Dict]] = {}
+    for rec in per_doc:
+        entry = (clusters_from_json(rec["gold"]), clusters_from_json(rec["pred"]))
+        buckets.setdefault(rec.get("language", "all"), []).append(entry)
+        buckets.setdefault("overall", []).append(entry)
+
+    return buckets
+
+
 def main(
     results_json: Optional[str] = None,
     ablation_dir: Optional[str] = None,
     ablation_names: Optional[List[str]] = None,
+    predictions_json: Optional[str] = None,
 ) -> None:
     if results_json and os.path.exists(results_json):
         with open(results_json) as fh:
@@ -235,6 +257,23 @@ def main(
     else:
         if results_json:
             print(f"[warn] {results_json} not found — skipping score table")
+
+    # Cluster-size distribution + error analysis need the per-document clusters.
+    if predictions_json is None and results_json:
+        candidate = os.path.join(os.path.dirname(results_json), "predictions.json")
+        predictions_json = candidate if os.path.exists(candidate) else None
+
+    if predictions_json and os.path.exists(predictions_json):
+        buckets = load_predictions(predictions_json)
+        for lang in sorted(buckets, key=lambda k: (k == "overall", k)):
+            pairs = buckets[lang]
+            gold_list = [g for g, _ in pairs]
+            pred_list = [p for _, p in pairs]
+            label = f"{lang.upper()} ({len(pairs)} docs)"
+            print_cluster_distribution(gold_list, pred_list, label=label)
+            error_analysis(gold_list, pred_list, label=label)
+    elif predictions_json:
+        print(f"[warn] {predictions_json} not found — skipping cluster analysis")
 
     if ablation_dir and ablation_names:
         print_ablation_table(ablation_dir, ablation_names)
@@ -255,11 +294,14 @@ if __name__ == "__main__":
                         help="Directory containing one results JSON per instruction run")
     parser.add_argument("--ablation_names", nargs="*", default=None,
                         help="Names (without .json) of ablation files to compare")
-    parser.add_argument("--config",         default="config.yaml")
+    parser.add_argument("--predictions_json", default=None,
+                        help="Path to inference_output/predictions.json "
+                             "(defaults to the sibling of --results_json)")
     args = parser.parse_args()
 
     main(
         results_json=args.results_json,
         ablation_dir=args.ablation_dir,
         ablation_names=args.ablation_names,
+        predictions_json=args.predictions_json,
     )
