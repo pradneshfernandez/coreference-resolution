@@ -129,6 +129,16 @@ def merge_clusters_over_frames(
     return glob_cls, dict(clusters)
 
 
+def clusters_to_json(clusters: Dict[int, Set[MPos]]) -> Dict[str, List[List[int]]]:
+    """{cluster_id: {(s, a, b), …}} → JSON-serialisable {"cid": [[s, a, b], …]}."""
+    return {str(cid): sorted(list(m) for m in mset) for cid, mset in clusters.items()}
+
+
+def clusters_from_json(data: Dict[str, List[List[int]]]) -> Dict[int, Set[MPos]]:
+    """Inverse of clusters_to_json."""
+    return {int(cid): {tuple(m) for m in mlist} for cid, mlist in data.items()}
+
+
 # ---------------------------------------------------------------------------
 # Gold cluster extraction (for evaluation)
 # ---------------------------------------------------------------------------
@@ -160,7 +170,7 @@ def write_conll_predictions(
     doc,
     pred_glob_cls: GlobalCluster,
     out_path: str,
-    part: int = 0,
+    part: Optional[int] = None,
 ) -> None:
     """
     Write predicted coreference annotations in CoNLL format.
@@ -171,11 +181,16 @@ def write_conll_predictions(
         doc           — parsed Document (for token/sentence structure)
         pred_glob_cls — dict (sent_idx, start_tok, end_tok) → pred_cluster_id
         out_path      — output file path
-        part          — part number (usually 0)
+        part          — part number; defaults to the document's own part
     """
     import os
 
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # Write the *original* CoNLL identity, not the internal unique key.
+    header_id = getattr(doc, "base_doc_id", "") or doc.doc_id
+    if part is None:
+        part = getattr(doc, "part", 0)
 
     # Build token-level coreference annotations from predicted spans
     # coref_col[sent_idx][tok_idx] = list of annotation strings (e.g. '(0)', '(0', '0)')
@@ -196,13 +211,13 @@ def write_conll_predictions(
             sent_col[end].append(f"{gid})")
 
     with open(out_path, "w", encoding="utf-8") as fh:
-        fh.write(f"#begin document ({doc.doc_id}); part {part}\n")
+        fh.write(f"#begin document ({header_id}); part {part}\n")
         for sent in doc.sentences:
             for tok in sent.tokens:
                 ann_list = coref_col.get(sent.sent_idx, {}).get(tok.idx, [])
                 ann = "|".join(ann_list) if ann_list else "-"
                 fh.write(
-                    f"{doc.doc_id}\t{part}\t{tok.idx}\t{tok.text}\t_\t_\t{ann}\n"
+                    f"{header_id}\t{part}\t{tok.idx}\t{tok.text}\t_\t_\t{ann}\n"
                 )
             fh.write("\n")
         fh.write("#end document\n")
