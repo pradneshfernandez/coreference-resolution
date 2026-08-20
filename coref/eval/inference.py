@@ -20,10 +20,14 @@ Optimised implementation — incremental KV-cache reuse:
 
 from __future__ import annotations
 
+import json
 import re
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
-import torch
+try:                                    # torch is only needed for real decoding;
+    import torch                        # the prompt/postprocessing helpers below
+except ImportError:                     # are pure Python and run without it.
+    torch = None                        # type: ignore[assignment]
 
 
 # Module-level flag: start with batched chunk extension, fall back if needed.
@@ -106,6 +110,15 @@ def _extend_kv_chunk(model, chunk_ids, kv, kv_len, device):
             return out.logits[:, -1, :], out.past_key_values, kv_len + n
         except (AssertionError, RuntimeError):
             _use_batched_chunks = False
+            # The failed forward may already have appended keys/values to the
+            # cache. Roll it back to kv_len so the single-token path below does
+            # not decode against a corrupted (too long) cache.
+            crop = getattr(kv, "crop", None)
+            if callable(crop):
+                try:
+                    crop(kv_len)
+                except Exception:
+                    pass
             # Fall through to single-token path
 
     # ── Single-token fallback ───────────────────────────────────────────
@@ -117,19 +130,38 @@ def _extend_kv_chunk(model, chunk_ids, kv, kv_len, device):
 
 
 # ---------------------------------------------------------------------------
+# Mask handling (pure Python — no torch required)
+# ---------------------------------------------------------------------------
+
+def split_masked_input(masked_input: str) -> List[str]:
+    """
+    Split a masked input on its mask tokens.
+
+    Overt mentions are marked '#MASK', zero mentions '@MASK'; both are split
+    points. Returns n_masks + 1 text segments.
+    """
+    return re.split(r"[#@]MASK", masked_input)
+
+
+def reconstruct_output(segments: Sequence[str], predicted: Sequence[int]) -> str:
+    """Re-join segments, replacing each mask with '#<predicted cluster number>'."""
+    parts = [segments[0]]
+    for j, num in enumerate(predicted):
+        parts.append(f"#{num}")
+        parts.append(segments[j + 1])
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
 
 def _build_prefix_str(tokenizer, instruction: str, masked_input: str) -> str:
     """Apply the chat template to produce the constant per-frame prefix."""
-    messages = [
-        {"role": "system", "content": instruction},
-        {"role": "user",   "content": masked_input},
-    ]
-    return tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
+    from coref.data.chat_format import build_chat_text
+
+    return build_chat_text(
+        tokenizer, instruction, masked_input, add_generation_prompt=True
     )
 
 
@@ -173,7 +205,7 @@ def controlled_inference(
               them through `_extend_kv_chunk` (batched or single-token).
       3. Reconstruct and return the output string.
     """
-    segments = re.split(r"[#@]MASK", masked_input)
+    segments = split_masked_input(masked_input)
     n_masks = len(segments) - 1
 
     if n_masks == 0:
@@ -221,13 +253,7 @@ def controlled_inference(
                 model, chunk_ids, kv, kv_len, device
             )
 
-    # ── Reconstruct the output string ────────────────────────────────────────
-    parts = [segments[0]]
-    for j, num in enumerate(predicted_locals):
-        parts.append(f"#{num}")
-        parts.append(segments[j + 1])
-
-    return "".join(parts), predicted_locals
+    return reconstruct_output(segments, predicted_locals), predicted_locals
 
 
 # ---------------------------------------------------------------------------
@@ -252,54 +278,99 @@ def run_inference_on_examples(
 
     Returns a list of result dicts with 'predicted_local_no' added to each mention.
     """
-    import json
-
     if device is None:
         device = next(model.parameters()).device
 
     model.eval()
-    results = []
 
-    for idx, ex in enumerate(examples):
-        if hasattr(ex, "masked_input"):
-            instruction     = ex.instruction
-            masked_input    = ex.masked_input
-            doc_id          = ex.doc_id
-            before_mentions = ex.before_mentions
-            after_mentions  = ex.after_mentions
-            before_si       = ex.before_sent_indices
-            after_si        = ex.after_sent_indices
-        else:
-            instruction     = ex["instruction"]
-            masked_input    = ex["input"]
-            doc_id          = ex["doc_id"]
-            before_mentions = json.loads(ex["before_mentions"]) if isinstance(ex["before_mentions"], str) else ex["before_mentions"]
-            after_mentions  = json.loads(ex["after_mentions"])  if isinstance(ex["after_mentions"],  str) else ex["after_mentions"]
-            before_si       = json.loads(ex["before_sent_indices"]) if isinstance(ex["before_sent_indices"], str) else ex["before_sent_indices"]
-            after_si        = json.loads(ex["after_sent_indices"])  if isinstance(ex["after_sent_indices"],  str) else ex["after_sent_indices"]
-
-        if verbose and idx % 50 == 0:
-            print(f"  Inference [{idx}/{len(examples)}] doc={doc_id} …")
-
-        output_text, predicted_locals = controlled_inference(
+    def _predict(instruction: str, masked_input: str, n_masks: int) -> List[int]:
+        _, predicted = controlled_inference(
             model, tokenizer, instruction, masked_input, device,
             max_cluster_id, max_seq_length,
         )
+        return predicted
 
-        all_mentions = list(before_mentions) + list(after_mentions)
+    return run_inference_with_predictor(examples, _predict, verbose=verbose)
+
+
+def _unpack_example(ex) -> dict:
+    """Normalise a FrameExample or a JSONL record into a plain dict."""
+    def _maybe_json(v):
+        return json.loads(v) if isinstance(v, str) else v
+
+    if hasattr(ex, "masked_input"):
+        return {
+            "doc_id":          ex.doc_id,
+            "instruction":     ex.instruction,
+            "masked_input":    ex.masked_input,
+            "before_mentions": ex.before_mentions,
+            "after_mentions":  ex.after_mentions,
+            "before_si":       ex.before_sent_indices,
+            "after_si":        ex.after_sent_indices,
+        }
+    return {
+        "doc_id":          ex["doc_id"],
+        "instruction":     ex["instruction"],
+        "masked_input":    ex["input"],
+        "before_mentions": _maybe_json(ex["before_mentions"]),
+        "after_mentions":  _maybe_json(ex["after_mentions"]),
+        "before_si":       _maybe_json(ex["before_sent_indices"]),
+        "after_si":        _maybe_json(ex["after_sent_indices"]),
+    }
+
+
+def run_inference_with_predictor(
+    examples: list,
+    predict_fn: Callable[[str, str, int], List[int]],
+    verbose: bool = False,
+) -> List[dict]:
+    """
+    Drive the frame loop with an arbitrary predictor.
+
+    *predict_fn* receives (instruction, masked_input, n_masks) and returns one
+    predicted local cluster number per mask, in order. This is what lets the
+    same postprocessing / evaluation path be exercised by a real model, by a
+    heuristic, or by a stub in tests — with no torch required.
+    """
+    results: List[dict] = []
+
+    for idx, raw in enumerate(examples):
+        ex = _unpack_example(raw)
+
+        if verbose and idx % 50 == 0:
+            print(f"  Inference [{idx}/{len(examples)}] doc={ex['doc_id']} …")
+
+        segments = split_masked_input(ex["masked_input"])
+        n_masks  = len(segments) - 1
+
+        predicted = list(predict_fn(ex["instruction"], ex["masked_input"], n_masks))[:n_masks]
+
+        before_mentions = list(ex["before_mentions"])
+        after_mentions  = list(ex["after_mentions"])
+        all_mentions    = before_mentions + after_mentions
+
+        # Any mask the model failed to answer for becomes its own singleton,
+        # numbered above every cluster it did predict — falling back to the
+        # mention's own index would silently merge it with a real cluster.
+        next_free = (max(predicted) + 1) if predicted else 0
+        while len(predicted) < max(n_masks, len(all_mentions)):
+            predicted.append(next_free)
+            next_free += 1
+
+        annotated = []
         for k, mention in enumerate(all_mentions):
             m_dict = dict(mention)
-            m_dict["predicted_local_no"] = predicted_locals[k] if k < len(predicted_locals) else k
-            all_mentions[k] = m_dict
+            m_dict["predicted_local_no"] = predicted[k]
+            annotated.append(m_dict)
 
         n_before = len(before_mentions)
         results.append({
-            "doc_id":              doc_id,
-            "before_sent_indices": before_si,
-            "after_sent_indices":  after_si,
-            "before_mentions":     all_mentions[:n_before],
-            "after_mentions":      all_mentions[n_before:],
-            "output_text":         output_text,
+            "doc_id":              ex["doc_id"],
+            "before_sent_indices": ex["before_si"],
+            "after_sent_indices":  ex["after_si"],
+            "before_mentions":     annotated[:n_before],
+            "after_mentions":      annotated[n_before:],
+            "output_text":         reconstruct_output(segments, predicted[:n_masks]),
         })
 
     return results
