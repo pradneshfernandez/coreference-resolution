@@ -209,12 +209,23 @@ recommended for a headline run.
 ### 5.3 Pre-GPU validation
 
 Everything except fine-tuning runs without a GPU, and we run it before booking
-GPU time. `make test` executes 36 unit tests (parsing, Algorithm 1, scorer,
-loss masking, resume logic). `make local` runs four stages against the real
+GPU time. `make test` executes 40 unit tests (parsing, Algorithm 1, scorer,
+loss masking, training-argument construction, resume logic). `make local` runs four stages against the real
 corpus: environment and data check over every document, frame construction with
 a 1:1 mask/mention-record assertion, an end-to-end dry run driven by a stub
 predictor, and the baselines. The check stage reads every document, since the
 properties it certifies are precisely those a sample would miss.
+
+Separately, the whole path has been exercised with a *real* model on CPU —
+Qwen2.5-0.5B-Instruct, LoRA-tuned on a handful of examples, then run through
+controlled inference, Algorithm 1 and the scorer. The resulting scores are
+meaningless and are not reported; the point is that model loading, completion-
+only loss masking, adapter saving, adapter reloading and constrained decoding
+all execute against the current library versions (transformers 5.15, TRL 0.20,
+PEFT 0.20) before any GPU time is spent. Inference resume was verified the same
+way: re-running a completed set reproduces the identical scores from the shard
+without invoking the model, and extending the document limit runs only the
+documents that are new.
 
 ### 5.4 Evaluation
 
@@ -358,7 +369,7 @@ breakdown of the final results would be worth reporting for that reason.
 ### 8.1 Running it
 
 ```bash
-make test                              # 36 unit tests, no GPU
+make test                              # 40 unit tests, no GPU
 make local                             # full CPU validation against the corpus
 make prepare CONFIG=configs/a100.yaml  # 13,761 / 1,758 / 2,006 frame examples
 make train   CONFIG=configs/a100.yaml  # ≈2,580 steps; resumes from checkpoints
@@ -379,8 +390,9 @@ make baseline && make analysis
 | Ceilings | Mention coverage and frame-chaining split rate are reported, not assumed |
 | Baselines | The numbers a trained model has to beat |
 
-`make test` runs 36 unit tests over parsing, Algorithm 1, the scorer, loss
-masking and inference resume — all pure Python, no torch, no GPU.
+`make test` runs 40 unit tests over parsing, Algorithm 1, the scorer, loss
+masking, training-argument construction and inference resume. All run without a
+GPU; the four that check trainer configuration skip when transformers is absent.
 
 ## References
 

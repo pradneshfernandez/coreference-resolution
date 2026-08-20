@@ -11,7 +11,7 @@ end to end on CPU; no GPU run has taken place, so there are no system results.
 
 | | |
 |---|---|
-| Pipeline | Complete — 36 unit tests, full-corpus CPU validation passing |
+| Pipeline | Complete — 40 unit tests, full-corpus CPU validation passing |
 | Data | Prepared: 13,761 / 1,758 / 2,006 train/dev/test frame examples |
 | Baselines | Measured on the full test split — MFE **CoNLL-F 53.34** |
 | Pipeline ceiling | Measured — **CoNLL-F 93.04** with perfect predictions |
