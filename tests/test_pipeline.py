@@ -184,3 +184,49 @@ class TestScorer(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+class TestDuplicateSpanAnnotations(unittest.TestCase):
+    """The corpus annotates some spans for two clusters at once ('(3|(4' …
+    '3)|4)'). A span carries one position key and the model emits one number
+    per mask, so the surplus annotation has to be resolved at parse time — and
+    resolved the same way every time, or gold and predicted clusterings
+    disagree about a span that was linked correctly."""
+
+    def _doc_with_double_annotation(self):
+        body = "\n".join([
+            "#begin document (d1); part 0",
+            _row("d1", 0, 0, "both", "(3|(4"),
+            _row("d1", 0, 1, "countries", "3)|4)"),
+            _row("d1", 0, 2, "they", "(3)"),
+            "",
+            "#end document",
+        ]) + "\n"
+        path = _write_conll(body)
+        try:
+            return parse_conll_file(path)[0]
+        finally:
+            os.unlink(path)
+
+    def test_span_keeps_exactly_one_annotation(self):
+        doc = self._doc_with_double_annotation()
+        keys = [m.position_key for m in doc.mentions]
+        self.assertEqual(len(keys), len(set(keys)),
+                         "a span must not appear twice in doc.mentions")
+
+    def test_lowest_cluster_id_wins_deterministically(self):
+        doc = self._doc_with_double_annotation()
+        span = [m for m in doc.mentions if m.position_key == (0, 0, 1)]
+        self.assertEqual(len(span), 1)
+        self.assertEqual(span[0].cluster_id, 3)
+
+    def test_other_mentions_are_untouched(self):
+        doc = self._doc_with_double_annotation()
+        self.assertIn((0, 2, 2), [m.position_key for m in doc.mentions])
+
+    def test_clusters_index_agrees_with_mention_list(self):
+        """doc.clusters is built from the deduplicated list, so the surviving
+        span must appear in cluster 3 and nowhere else."""
+        doc = self._doc_with_double_annotation()
+        in_4 = [m.position_key for m in doc.clusters.get(4, [])]
+        self.assertNotIn((0, 0, 1), in_4)
+        self.assertIn((0, 0, 1), [m.position_key for m in doc.clusters[3]])
