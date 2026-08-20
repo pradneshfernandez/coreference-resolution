@@ -10,7 +10,6 @@ build/
 .eggs/
 .installed.cfg
 pip-selfcheck.json
-test_inference.py
 # Virtual environments
 .venv/
 venv/
@@ -34,6 +33,7 @@ transmucores_data/
 processed_data/
 inference_output/
 model_output/
+local_output/
 
 # Generated outputs
 *.zip
