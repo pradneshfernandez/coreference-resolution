@@ -1,6 +1,20 @@
 # ============================================================
 # T4 preset (Colab free tier — 16 GB VRAM)
 # Llama 3.1 8B 4-bit via unsloth.  Effective batch = 2 × 8 = 16.
+#
+# WARNING — read before using this preset for a full run.
+# The T4 only fits max_seq_length=1024, and one training example is
+# instruction + masked_input + output (the output roughly doubles the
+# masked text). At max_tokens_per_frame=256 that averaged ~740 words
+# ≈ 1500-2200 tokens, so 73-83% of examples were right-truncated —
+# which cuts off the assistant target and trains on inputs with no
+# labels. max_tokens_per_frame is therefore 64 here, not 256.
+#
+# The cost: smaller frames mean far more examples (~58k vs ~14k), so
+# 3 epochs is ~10.9k optimizer steps and will not finish in a free-tier
+# session. For a real full run use configs/l4.yaml or configs/a100.yaml.
+# This preset is best used with --few_shot, or with num_epochs: 1.
+# Verify with:  python scripts/run_local.py prepare --config configs/t4.yaml
 # ============================================================
 
 data:
@@ -13,7 +27,7 @@ data:
 
 preprocessing:
   instruction_id: 5
-  max_tokens_per_frame: 256
+  max_tokens_per_frame: 64    # sized so instruction+input+output fits in 1024
   min_mentions_per_example: 1
 
 model:
@@ -40,6 +54,10 @@ training:
   logging_steps: 10
   save_steps: 200
   eval_steps: 200
+  # Cap the dev set used for mid-training eval. The full dev split is 1,758
+  # examples; evaluating all of them every eval_steps costs more GPU time than
+  # it buys. 0 = use the whole split.
+  eval_max_examples: 300
   bf16: false                       # T4 doesn't support bfloat16
   fp16: true
   dataloader_num_workers: 0

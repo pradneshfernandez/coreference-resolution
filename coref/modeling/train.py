@@ -11,15 +11,15 @@ Training loop:
 
 from __future__ import annotations
 
+import inspect
 import os
 from typing import Optional
 
-import torch
 from datasets import Dataset
-from transformers import TrainingArguments
 
 from coref.data.dataset_builder import format_for_sft, load_jsonl
-from coref.modeling.model import load_model_and_tokenizer
+from coref.modeling.model import (cuda_available, load_model_and_tokenizer,
+                                  select_backend)
 
 
 # ---------------------------------------------------------------------------
@@ -48,11 +48,13 @@ def train(
     logging_steps: int = 10,
     save_steps: int = 200,
     eval_steps: int = 200,
+    eval_max_examples: int = 300,
     seed: int = 42,
     bf16: bool = True,
     fp16: bool = False,
     dataloader_workers: int = 0,
     backend: str = "auto",
+    resume: bool = True,
 ) -> None:
     """
     Fine-tune a causal LM on CorefInst examples.
@@ -62,6 +64,7 @@ def train(
         dev_path     — optional path to dev.jsonl for eval during training
         output_dir   — directory to save checkpoints and final model
         model_name   — HuggingFace model ID or local path
+        resume       — continue from the newest checkpoint in output_dir if any
         …            — remaining kwargs map to TrainingArguments / LoRA config
     """
     # ------------------------------------------------------------------
@@ -75,6 +78,16 @@ def train(
     if dev_path and os.path.exists(dev_path):
         eval_dataset = load_jsonl(dev_path)
         print(f"  {len(eval_dataset)} dev examples")
+        # Mid-training eval runs every eval_steps and its only job is to show
+        # whether the loss is still falling. Scoring the whole dev split for
+        # that costs GPU hours the run cannot spare, so take a fixed random
+        # subsample (seeded, hence identical at every eval).
+        if eval_max_examples and len(eval_dataset) > eval_max_examples:
+            eval_dataset = eval_dataset.shuffle(seed=seed).select(
+                range(eval_max_examples)
+            )
+            print(f"  using a {len(eval_dataset)}-example dev subsample for "
+                  f"mid-training eval (set training.eval_max_examples: 0 for all)")
 
     # ------------------------------------------------------------------
     # 2. Load model + tokenizer
@@ -120,14 +133,28 @@ def train(
     # Unsloth sets up gradient checkpointing on the model itself via
     # use_gradient_checkpointing="unsloth" in get_peft_model — don't duplicate it
     # in TrainingArguments or the two implementations conflict.
-    _use_unsloth = False
-    try:
-        import unsloth  # type: ignore  # noqa: F401
-        _use_unsloth = True
-    except ImportError:
-        pass
+    # Ask the same helper load_model_and_tokenizer used, so this cannot
+    # disagree with which backend actually loaded the model.
+    _use_unsloth = select_backend(backend)
 
-    training_args = TrainingArguments(
+    on_cuda = cuda_available()
+    if not on_cuda and (bf16 or fp16):
+        print("[info] No CUDA device — training in fp32 (bf16/fp16 disabled).")
+        bf16 = fp16 = False
+
+    # adamw_8bit needs bitsandbytes + CUDA.
+    optim = "adamw_8bit" if (load_in_4bit and on_cuda) else "adamw_torch"
+
+    # load_best_model_at_end requires the save and eval schedules to line up,
+    # and save_steps to be a whole multiple of eval_steps — Trainer raises
+    # otherwise. Only enable it when that actually holds.
+    do_eval = eval_dataset is not None
+    can_load_best = do_eval and eval_steps > 0 and save_steps % eval_steps == 0
+    if do_eval and not can_load_best:
+        print(f"[warn] save_steps={save_steps} is not a multiple of "
+              f"eval_steps={eval_steps} — not loading the best checkpoint at end.")
+
+    training_args = _build_training_args(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
         per_device_train_batch_size=per_device_batch_size,
@@ -136,22 +163,25 @@ def train(
         gradient_checkpointing=not _use_unsloth,   # unsloth handles its own GC
         gradient_checkpointing_kwargs={"use_reentrant": False} if not _use_unsloth else {},
         learning_rate=learning_rate,
-        warmup_steps=int(warmup_ratio * (len(train_dataset) // (per_device_batch_size * gradient_accumulation_steps)) * num_epochs),
+        warmup_ratio=warmup_ratio,
         lr_scheduler_type=lr_scheduler,
         weight_decay=weight_decay,
         max_grad_norm=max_grad_norm,
         logging_steps=logging_steps,
+        save_strategy="steps",
         save_steps=save_steps,
-        eval_strategy="steps" if eval_dataset is not None else "no",
-        eval_steps=eval_steps if eval_dataset is not None else None,
+        eval_strategy="steps" if do_eval else "no",
+        eval_steps=eval_steps if do_eval else None,
         save_total_limit=3,
-        load_best_model_at_end=eval_dataset is not None,
+        load_best_model_at_end=can_load_best,
         bf16=bf16,
         fp16=fp16,
         dataloader_num_workers=dataloader_workers,
         seed=seed,
         report_to="none",
-        optim="adamw_8bit" if load_in_4bit else "adamw_torch",
+        optim=optim,
+        max_seq_length=max_seq_length,
+        dataset_text_field="text",
     )
 
     # ------------------------------------------------------------------
@@ -159,65 +189,82 @@ def train(
     # ------------------------------------------------------------------
     try:
         from trl import SFTTrainer  # type: ignore
-
-        # DataCollatorForCompletionOnlyLM moved across TRL versions — try all locations.
-        DataCollatorForCompletionOnlyLM = None
-        for _mod, _cls in [
-            ("trl", "DataCollatorForCompletionOnlyLM"),
-            ("trl.trainer", "DataCollatorForCompletionOnlyLM"),
-            ("trl.trainer.utils", "DataCollatorForCompletionOnlyLM"),
-            ("trl.data_utils", "DataCollatorForCompletionOnlyLM"),
-        ]:
-            try:
-                import importlib
-                _m = importlib.import_module(_mod)
-                DataCollatorForCompletionOnlyLM = getattr(_m, _cls, None)
-                if DataCollatorForCompletionOnlyLM is not None:
-                    break
-            except ImportError:
-                pass
-
-        # Identify the response template so we only compute loss on output tokens.
-        response_template = _find_response_template(tokenizer)
-
-        if response_template and DataCollatorForCompletionOnlyLM is not None:
-            collator = DataCollatorForCompletionOnlyLM(
-                response_template=response_template,
-                tokenizer=tokenizer,
-            )
-            trainer = SFTTrainer(
-                model=model,
-                tokenizer=tokenizer,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                dataset_text_field="text",
-                max_seq_length=max_seq_length,
-                data_collator=collator,
-                args=training_args,
-            )
-        else:
-            if DataCollatorForCompletionOnlyLM is None:
-                print("[warn] DataCollatorForCompletionOnlyLM not found — computing loss on all tokens.")
-            trainer = SFTTrainer(
-                model=model,
-                tokenizer=tokenizer,
-                train_dataset=train_dataset,
-                eval_dataset=eval_dataset,
-                dataset_text_field="text",
-                max_seq_length=max_seq_length,
-                args=training_args,
-            )
-
     except ImportError:
         raise ImportError(
             "trl is required for training. Install with: pip install trl"
         )
 
+    # DataCollatorForCompletionOnlyLM moved across TRL versions — try all
+    # locations, and accept that recent releases dropped it entirely.
+    DataCollatorForCompletionOnlyLM = None
+    for _mod in ("trl", "trl.trainer", "trl.trainer.utils", "trl.data_utils"):
+        try:
+            import importlib
+            _m = importlib.import_module(_mod)
+        except ImportError:
+            continue
+        DataCollatorForCompletionOnlyLM = getattr(
+            _m, "DataCollatorForCompletionOnlyLM", None
+        )
+        if DataCollatorForCompletionOnlyLM is not None:
+            break
+
+    # Identify the response template so we only compute loss on output tokens.
+    response_template = _find_response_template(tokenizer)
+
+    trainer_kwargs = dict(
+        model=model,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        args=training_args,
+    )
+
+    # TRL renamed `tokenizer` → `processing_class` in 0.12.
+    _sft_params = inspect.signature(SFTTrainer.__init__).parameters
+    if "processing_class" in _sft_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        trainer_kwargs["tokenizer"] = tokenizer
+
+    # Old TRL took these on the trainer; new TRL takes them on SFTConfig,
+    # where _build_training_args has already set them.
+    for key, value in (("dataset_text_field", "text"),
+                       ("max_seq_length", max_seq_length)):
+        if key in _sft_params:
+            trainer_kwargs[key] = value
+
+    if response_template and DataCollatorForCompletionOnlyLM is not None:
+        trainer_kwargs["data_collator"] = DataCollatorForCompletionOnlyLM(
+            response_template=response_template,
+            tokenizer=tokenizer,
+        )
+    else:
+        print("[warn] Completion-only collator unavailable "
+              f"(template={'found' if response_template else 'not found'}) — "
+              "computing loss on all tokens, including the prompt.")
+
+    trainer = SFTTrainer(**trainer_kwargs)
+
     # ------------------------------------------------------------------
     # 6. Train
     # ------------------------------------------------------------------
-    print("\nStarting training …")
-    trainer.train()
+    # Colab sessions time out well before a full run finishes, so pick up from
+    # the newest checkpoint in output_dir if one is there. Without this, every
+    # reconnect silently restarts from step 0 and the run never completes.
+    resume_from = None
+    if resume:
+        from transformers.trainer_utils import get_last_checkpoint
+        try:
+            resume_from = get_last_checkpoint(output_dir)
+        except (FileNotFoundError, OSError):
+            resume_from = None
+
+    if resume_from:
+        print(f"\nResuming training from {resume_from} …")
+    else:
+        print("\nStarting training from scratch …")
+
+    trainer.train(resume_from_checkpoint=resume_from)
 
     # ------------------------------------------------------------------
     # 7. Save
@@ -229,8 +276,46 @@ def train(
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
+
+def _build_training_args(**kwargs):
+    """
+    Build the trainer config in a way that survives TRL/transformers churn.
+
+    • TRL >= 0.12 wants an SFTConfig that also carries `max_seq_length` and
+      `dataset_text_field`; older TRL wants a plain TrainingArguments and takes
+      those two on the trainer instead.
+    • transformers renamed `evaluation_strategy` → `eval_strategy` in 4.41.
+
+    Any keyword the installed classes do not accept is dropped rather than
+    raising, so a version bump degrades instead of crashing at startup.
+    """
+    from transformers import TrainingArguments
+
+    cls = TrainingArguments
+    try:
+        from trl import SFTConfig  # type: ignore
+        cls = SFTConfig
+    except ImportError:
+        pass
+
+    params = inspect.signature(cls.__init__).parameters
+
+    # Renames across versions: keep the value, change the key.
+    for old, new in (("eval_strategy", "evaluation_strategy"),   # transformers < 4.41
+                     ("max_seq_length", "max_length")):          # trl >= 0.20
+        if old in kwargs and old not in params and new in params:
+            kwargs[new] = kwargs.pop(old)
+
+    dropped = [k for k in kwargs if k not in params]
+    for k in dropped:
+        kwargs.pop(k)
+    if dropped:
+        print(f"[info] {cls.__name__} does not accept {dropped} — ignoring.")
+
+    return cls(**kwargs)
+
 
 def _find_response_template(tokenizer) -> Optional[str]:
     """
@@ -246,11 +331,17 @@ def _find_response_template(tokenizer) -> Optional[str]:
         "<|im_start|>assistant\n",                              # ChatML / Qwen
     ]
     # Test which template produces tokens present in a dummy formatted string
-    dummy = tokenizer.apply_chat_template(
-        [{"role": "assistant", "content": "hello"}],
-        tokenize=False,
-        add_generation_prompt=False,
-    )
+    try:
+        dummy = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "hi"},
+             {"role": "assistant", "content": "hello"}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except Exception as exc:
+        print(f"[warn] tokenizer has no usable chat template ({exc}).")
+        return None
+
     for cand in candidates:
         if cand in dummy:
             return cand

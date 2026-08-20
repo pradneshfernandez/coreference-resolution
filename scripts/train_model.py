@@ -22,7 +22,8 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(fh)
 
 
-def main(config_path: str = "config.yaml", few_shot_n: int = None) -> None:
+def main(config_path: str = "config.yaml", few_shot_n: int = None,
+         resume: bool = True) -> None:
     cfg = load_config(config_path)
 
     data_dir   = cfg["data"]["output_dir"]
@@ -79,11 +80,13 @@ def main(config_path: str = "config.yaml", few_shot_n: int = None) -> None:
         logging_steps=train_cfg["logging_steps"],
         save_steps=train_cfg["save_steps"],
         eval_steps=train_cfg["eval_steps"],
+        eval_max_examples=train_cfg.get("eval_max_examples", 300),
         seed=train_cfg["seed"],
         bf16=train_cfg.get("bf16", True),
         fp16=train_cfg.get("fp16", False),
         dataloader_workers=train_cfg.get("dataloader_num_workers", 0),
         backend="auto",
+        resume=resume,
     )
 
 
@@ -92,5 +95,7 @@ if __name__ == "__main__":
     parser.add_argument("--config",   default="config.yaml")
     parser.add_argument("--few_shot", type=int, default=None,
                         help="Train on N examples per language (few-shot mode)")
+    parser.add_argument("--no_resume", action="store_true",
+                        help="Ignore existing checkpoints and train from scratch")
     args = parser.parse_args()
-    main(args.config, few_shot_n=args.few_shot)
+    main(args.config, few_shot_n=args.few_shot, resume=not args.no_resume)

@@ -13,7 +13,7 @@ data:
 
 preprocessing:
   instruction_id: 5
-  max_tokens_per_frame: 512
+  max_tokens_per_frame: 128    # sized so instruction+input+output fits max_seq_length
   min_mentions_per_example: 1
 
 model:
@@ -40,6 +40,10 @@ training:
   logging_steps: 10
   save_steps: 200
   eval_steps: 200
+  # Cap the dev set used for mid-training eval. The full dev split is 1,758
+  # examples; evaluating all of them every eval_steps costs more GPU time than
+  # it buys. 0 = use the whole split.
+  eval_max_examples: 300
   bf16: true
   fp16: false
   dataloader_num_workers: 2
