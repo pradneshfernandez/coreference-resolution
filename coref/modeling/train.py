@@ -12,6 +12,7 @@ Training loop:
 from __future__ import annotations
 
 import inspect
+import math
 import os
 from typing import Optional
 
@@ -154,6 +155,16 @@ def train(
         print(f"[warn] save_steps={save_steps} is not a multiple of "
               f"eval_steps={eval_steps} — not loading the best checkpoint at end.")
 
+    # transformers 5 dropped warmup_ratio and keeps only warmup_steps, so the
+    # ratio is converted here and both are offered; _build_training_args keeps
+    # whichever the installed class accepts. Without this the configured warmup
+    # is silently discarded and the run starts at full learning rate.
+    effective_batch = max(per_device_batch_size * gradient_accumulation_steps, 1)
+    total_steps = math.ceil(len(train_dataset) / effective_batch) * max(num_epochs, 1)
+    warmup_steps = max(1, round(warmup_ratio * total_steps)) if warmup_ratio else 0
+    print(f"[info] {total_steps} optimizer steps planned; warmup {warmup_steps} "
+          f"step(s) ({warmup_ratio:.1%})")
+
     training_args = _build_training_args(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
@@ -164,6 +175,7 @@ def train(
         gradient_checkpointing_kwargs={"use_reentrant": False} if not _use_unsloth else {},
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
+        warmup_steps=warmup_steps,
         lr_scheduler_type=lr_scheduler,
         weight_decay=weight_decay,
         max_grad_norm=max_grad_norm,
@@ -283,9 +295,12 @@ def _build_training_args(**kwargs):
       `dataset_text_field`; older TRL wants a plain TrainingArguments and takes
       those two on the trainer instead.
     • transformers renamed `evaluation_strategy` → `eval_strategy` in 4.41.
+    • transformers 5 removed `warmup_ratio`, leaving only `warmup_steps`.
 
-    Any keyword the installed classes do not accept is dropped rather than
-    raising, so a version bump degrades instead of crashing at startup.
+    Keywords the installed classes do not accept are dropped rather than
+    raising, so a version bump degrades instead of crashing at startup. Because
+    a dropped keyword is a training hyperparameter that silently stops applying,
+    anything discarded is reported as a warning, not a note.
     """
     from transformers import TrainingArguments
 
@@ -304,11 +319,22 @@ def _build_training_args(**kwargs):
         if old in kwargs and old not in params and new in params:
             kwargs[new] = kwargs.pop(old)
 
+    # Equivalent pairs: the caller supplies both spellings of the same setting
+    # and exactly one survives, so dropping the other is not a loss.
+    equivalents = {"warmup_ratio": "warmup_steps", "warmup_steps": "warmup_ratio"}
+    benign = {
+        key for key, twin in equivalents.items()
+        if key not in params and twin in params and twin in kwargs
+    }
+    for key in benign:
+        kwargs.pop(key, None)
+
     dropped = [k for k in kwargs if k not in params]
     for k in dropped:
         kwargs.pop(k)
     if dropped:
-        print(f"[info] {cls.__name__} does not accept {dropped} — ignoring.")
+        print(f"[warn] {cls.__name__} does not accept {dropped} — these settings "
+              "will NOT be applied to this run.")
 
     return cls(**kwargs)
 
