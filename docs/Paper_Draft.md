@@ -192,19 +192,25 @@ normal, so it is not a failure that reveals itself during a run.
 
 ### 5.2 Sequence budget
 
-Measured over all 13,761 training examples, at 3 subword tokens per whitespace
-word:
+SFT string length over all 13,761 training examples: mean 738 words, p95 1,085,
+max 1,921. At 3 subword tokens per whitespace word, holding the frame budget at
+256 and varying only `max_seq_length`:
 
 | `max_seq_length` | Frame budget | Examples truncated |
 |---:|---:|---:|
 | 4096 | 256 | **0.9%** |
-| 2048 | 128 | (scaled budget, comparable) |
-| 1024 | 64 | (scaled budget, comparable) |
+| 2048 | 256 | 60.0% |
+| 1024 | 256 | 82.6% |
 
-SFT string length: mean 738 words, p95 1,085, max 1,921. The A100/H100 preset
-(4096/256) is therefore adequately sized; the T4 preset requires a 64-token
-frame budget, which fragments clusters far more aggressively and is not
-recommended for a headline run.
+The middle two rows are what happens when the frame budget is *not* rescaled
+with the sequence length, and they are the reason the coupling is worth stating:
+at `max_seq_length` 1024, five examples in six lose their training target while
+the run proceeds normally. Scaling the budget alongside — 128 at 2048, 64 at
+1024 — returns each preset to the same ≈1% as the top row.
+
+The A100/H100 preset (4096/256) is therefore adequately sized. The T4 preset is
+correct at 64 tokens per frame, but that budget fragments clusters far more
+aggressively, so it suits smoke runs rather than a headline result.
 
 ### 5.3 Pre-GPU validation
 
