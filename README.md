@@ -82,8 +82,8 @@ run, and the limitations. Two points carry over into any result:
 1. Open `CorefInst_Colab.ipynb` directly in Colab from the GitHub repository.
 2. Clone the repository in the notebook's first cell to set up the environment:
    ```bash
-   !git clone https://github.com/pradneshfernandez/coreference-resolution.git
-   %cd coreference-resolution
+   !git clone https://github.com/pradneshfernandez/InCoRes.git
+   %cd InCoRes
    !pip install -r requirements.txt
    !pip install "unsloth[colab-new]"
    ```
