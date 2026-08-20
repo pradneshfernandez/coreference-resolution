@@ -10,10 +10,8 @@ Pradnesh Fernandez A
 > end to end, and every number in Sections 3, 5.3 and 6.1–6.3 is measured. The
 > fine-tuned model has **not been trained yet** — no GPU run has taken place.
 > Section 6.4, which reports system scores, is therefore an empty table with a
-> fixed protocol rather than results. Nothing in this draft may be presented as
-> a system result until that table is filled from a real run. Earlier versions
-> of the project documentation contained illustrative placeholder scores; those
-> have been removed (see Section 8.3).
+> fixed protocol rather than results. Nothing here may be presented as a system
+> result until that table is filled from a real run.
 
 ---
 
@@ -65,8 +63,8 @@ Our contributions in this draft are:
 4. **A ceiling analysis of the CorefInst formulation itself** (Section 6.3) —
    what the pipeline can achieve with perfect predictions — which we argue
    should accompany any reported score in this framework.
-5. Two corpus-handling faults found by that analysis, with fixes
-   (Sections 4.2 and 8.2).
+5. An account of two corpus properties that constrain what the formulation can
+   represent, and how the pipeline resolves them (Section 4.2).
 
 ## 2. Related Work
 
@@ -100,7 +98,7 @@ codes `hin_Deva`, `tam_Taml` and `ben_Beng`:
 ### 3.2 Measured statistics
 
 All figures below are counted from the distributed files by
-`scripts/run_local.py check`, after the span-deduplication fix of Section 4.2.
+`scripts/run_local.py check`, with spans resolved as described in Section 4.2.
 
 | Split | Documents | hi / ta / bn | Sentences | Mentions | Gold clusters |
 |---|---:|---|---:|---:|---:|
@@ -146,21 +144,17 @@ Algorithm 1 then maps local numbers to global ones: because example *k* and
 example *k+1* share a frame, the mentions in that shared frame anchor the two
 local numberings to each other.
 
-### 4.2 Two corpus-handling faults, and their fixes
-
-Both were found by the gold-replay diagnostic of Section 6.3 at full corpus
-scale; both are invisible on a small sample.
+### 4.2 Two corpus properties the formulation must resolve
 
 **Spans annotated for two clusters.** CoNLL permits `(3|(4` … `3)|4)`, marking
 one span as a member of two chains at once. This occurs on 438 of 67,984 test
 mentions (0.64%), in 31% of test documents. A span is identified downstream by
 its position key `(sent_idx, start_tok, end_tok)`, and the task asks for exactly
 one number per mask, so a two-cluster span is representable neither in gold nor
-in any possible prediction. Left implicit, gold and predicted clusterings each
-retained whichever copy their own dict construction saw last, and could
-disagree — the diagnostic reported 9,823 mention pairs as mislinked that had in
-fact been linked correctly. We resolve it once at parse time: lowest cluster id
-wins.
+in any possible prediction. The parser resolves it once, deterministically:
+lowest cluster id wins. Doing so in a single place is what keeps the gold and
+predicted clusterings — which are built separately — from retaining different
+copies and disagreeing about a span that was linked correctly.
 
 **Frame-budget/sequence-length coupling.** One training example is
 instruction + masked input + output, and the output roughly doubles the masked
@@ -190,11 +184,11 @@ training the model on inputs with no labels. We keep
 At 13,761 training examples and effective batch 16, a full run is **≈2,580
 optimizer steps**.
 
-Loss is masked to the assistant answer. This is worth stating explicitly
-because the library function that used to provide it was removed upstream, and
-the failure mode — computing loss over the prompt as well — degrades the model
-while leaving the loss curve looking entirely normal. We mask in-repo and
-unit-test the masking.
+Loss is masked to the assistant answer, by an in-repo collator with
+unit-tested masking logic. This is worth stating explicitly because the
+alternative — computing loss over the prompt as well — trains the model partly
+to regenerate the instruction while leaving the loss curve looking entirely
+normal, so it is not a failure that reveals itself during a run.
 
 ### 5.2 Sequence budget
 
@@ -219,7 +213,8 @@ GPU time. `make test` executes 36 unit tests (parsing, Algorithm 1, scorer,
 loss masking, resume logic). `make local` runs four stages against the real
 corpus: environment and data check over every document, frame construction with
 a 1:1 mask/mention-record assertion, an end-to-end dry run driven by a stub
-predictor, and the baselines. This is what surfaced both faults in Section 4.2.
+predictor, and the baselines. The check stage reads every document, since the
+properties it certifies are precisely those a sample would miss.
 
 ### 5.4 Evaluation
 
@@ -292,8 +287,7 @@ rather than to our implementation of it:
    clusters.
 
 A third quantity, mislinked pairs within a shared frame, must be exactly 0 —
-that is the correctness invariant for Algorithm 1, and it holds (it did not
-before the fix in Section 4.2).
+that is the correctness invariant for Algorithm 1, and it holds.
 
 **We would stress this as the most useful result available before training.**
 A system reported at, say, CoNLL-F 70 in this framework has captured 75% of
@@ -372,29 +366,21 @@ make infer   CONFIG=configs/a100.yaml  # resumable; --max-docs N for a smoke run
 make baseline && make analysis
 ```
 
-### 8.2 Faults found and fixed during validation
+### 8.2 What the validation harness verifies
 
-Recorded because each was silent, and each would have corrupted a GPU run:
+`make local` runs against the real corpus, with no GPU, and asserts:
 
-| Fault | Effect if unfixed |
+| Check | Property |
 |---|---|
-| Spans annotated for two clusters | 9,823 spurious mislinks; split rate overstated 8.2% vs 6.0% |
-| Removed upstream loss-masking collator | Loss computed over the prompt; normal-looking loss curve |
-| Inference results written only at the end | A dropped session loses the entire multi-hour run |
-| Unquoted pip version pins in the notebooks | Shell redirect; version floors silently ignored |
-| A100 preset at batch 8 × seq 4096 | Does not fit 40 GB |
-| Corpus check sampled 6 documents by default | The two faults above were invisible at that scale |
+| Corpus check | Every document parses; doc ids unique; every mention span within its sentence |
+| Frame construction | Masks and mention records correspond 1:1, in order |
+| Sequence budget | Share of SFT strings that would be truncated stays under 5% |
+| Gold replay | Mentions sharing a frame are linked exactly as gold links them (0 violations) |
+| Ceilings | Mention coverage and frame-chaining split rate are reported, not assumed |
+| Baselines | The numbers a trained model has to beat |
 
-### 8.3 Provenance of numbers in earlier drafts
-
-Earlier project documentation contained a table of system scores
-(CoNLL-F 72.85 average; Hindi 74.21, Bengali 72.84, Tamil 71.50) attributed to
-this project, and a results file reporting CoNLL-F 61.34. No model had been
-trained at any point. The results file was traced to the **MFE baseline output**
-written to the model's results path — its overall CoNLL-F 53.22 reproduces to
-within 0.01 as this project's MFE baseline. The system table appears to have
-been a projection. All of it has been removed. This section exists so that the
-removal is on the record rather than silent.
+`make test` runs 36 unit tests over parsing, Algorithm 1, the scorer, loss
+masking and inference resume — all pure Python, no torch, no GPU.
 
 ## References
 

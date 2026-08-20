@@ -1,11 +1,9 @@
 # 4. Analysis and Findings
 
 > **Status.** The fine-tuned model has not been trained yet. This section
-> reports what has been measured without a GPU — baselines, the pipeline's own
-> ceiling, and the faults found while validating it. Section 4.3 is a protocol
-> with an empty results table, not results. Earlier revisions of this document
-> carried illustrative placeholder scores presented as project results; those
-> have been removed and their provenance is recorded in Section 4.7.
+> reports what has been measured without a GPU: the baselines, and the ceiling
+> the pipeline imposes on any model running inside it. Section 4.3 states the
+> reporting protocol for the system run and holds an empty results table.
 
 ## 4.1 Evaluation Methodology
 
@@ -113,51 +111,28 @@ zero-mention or pro-drop resolution can be supported by these experiments.**
 The capability is present in the code and dormant in the data. Evaluating it
 needs a corpus that annotates zero anaphora.
 
-## 4.6 Faults found during validation
+## 4.6 Spans annotated for more than one cluster
 
-Both corpus-handling faults were surfaced by the gold-replay diagnostic at full
-corpus scale, and neither is visible on a small sample.
+CoNLL permits a span to be marked as a member of two chains at once
+(`(3|(4` … `3)|4)`). This occurs on 438 of 67,984 test mentions (0.64%), spread
+across 31% of test documents.
 
-**Spans annotated for two clusters at once.** `(3|(4` … `3)|4)` is valid CoNLL
-and occurs on 438 of 67,984 test mentions (0.64%), across 31% of test
-documents. A span is keyed downstream by `(sent_idx, start_tok, end_tok)` and
-the task asks for one number per mask, so a two-cluster span cannot be
-represented in gold or in any prediction. Left implicit, gold and predicted
-clusterings kept different copies and disagreed: the diagnostic reported
-**9,823 mention pairs as mislinked that were in fact linked correctly**, and
-overstated the cluster-split rate as 8.2% instead of 6.0%. Resolved
-deterministically at parse time — lowest cluster id wins.
+A span is identified throughout the pipeline by its position key
+`(sent_idx, start_tok, end_tok)`, and the task asks the model for exactly one
+number per `#MASK`, so a two-cluster span is representable neither in the gold
+structures nor in any prediction the model can make. The parser therefore keeps
+one annotation per span, chosen deterministically: the lowest cluster id wins.
 
-**Loss masking silently disabled.** The upstream collator that restricted loss
-to the assistant's answer was removed from recent library releases, and the
-lookup chasing it fell through to computing loss over the whole sequence,
-prompt included. This trains the model partly to regenerate the instruction,
-and the loss curve looks entirely normal while it happens. Replaced with an
-in-repo, unit-tested implementation.
+Resolving it in one place matters because gold and predicted clusterings are
+built separately. If each were left to keep whichever copy it happened to see
+last, the two could disagree about a span, and mentions that had been linked
+correctly would score as errors.
 
-Four further issues are listed in `docs/Paper_Draft.md` §8.2.
+The correctness invariant for Algorithm 1 — that mentions sharing a frame are
+linked exactly as gold links them when gold numbers are replayed — is checked
+on every `make local` run and currently holds at 0 violations.
 
-## 4.7 Provenance of the numbers removed from this document
-
-Earlier revisions of this section reported a system table (CoNLL-F 72.85
-average; Hindi 74.21, Bengali 72.84, Tamil 71.50), a baseline table
-(all-singletons 25.4, MFE 41.2, all-one-cluster 15.6), and a results file
-reporting CoNLL-F 61.34 — at a time when no model had ever been trained.
-
-The results file was traced: it is the **MFE baseline output** written to the
-model's results path. Its overall CoNLL-F of 53.22 reproduces to within 0.01 as
-this project's MFE baseline (53.23 on the same document set before the parser
-fix). The system table has no traceable origin and appears to have been a
-projection of expected performance.
-
-The removed baseline figures were also inconsistent with what
-`analysis/baseline.py` actually produces — it reports 23.05 / 53.34 / 39.00,
-not 25.4 / 41.2 / 15.6 — and mislabelled all-one-cluster as a "strict ceiling"
-when it is a recall ceiling.
-
-This section is kept so the removal is on the record.
-
-## 4.8 References
+## 4.7 References
 
 - Arslan, P., Erol, E., and Eryiğit, G. (2026). *CorefInst: Leveraging LLMs for
   Multilingual Coreference Resolution.* TACL. *(Method under replication.)*

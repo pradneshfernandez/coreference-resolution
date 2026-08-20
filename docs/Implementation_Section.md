@@ -17,7 +17,7 @@ The foundational model operates explicitly via **Llama 3.1 8B Instruct**, which 
 - The model is loaded in 4-bit precision. 
 - A LoRA adapter (rank 16, alpha 16, dropout 0.0) is injected into the attention and MLP projections (q, k, v, o, gate, up, down) to learn the clustering semantics without disturbing the base weights.
 - Training is orchestrated via Hugging Face’s `SFTTrainer` (Supervised Fine-Tuning) and `trl` libraries.
-- Loss is computed on the assistant answer only, using the in-repo collator in `coref/modeling/collator.py`. TRL's own implementation was removed upstream, and falling back to full-sequence loss trains the model to regenerate the instruction while leaving the loss curve looking normal.
+- Loss is computed on the assistant answer only, using the in-repo collator in `coref/modeling/collator.py`, whose masking logic is unit-tested and independent of the TRL version installed. Computing loss over the prompt as well would train the model partly to regenerate the instruction, and would not show up as anything unusual in the loss curve.
 - One SFT example is instruction + masked input + output, and the output roughly doubles the masked text; on Indic scripts this comes to ≈16× the frame budget in subword tokens. `max_tokens_per_frame` is therefore kept near `max_seq_length / 16`, verified with `scripts/run_local.py prepare`.
 
 ## 3.4 Controlled Inference Engine (`inference.py`)
