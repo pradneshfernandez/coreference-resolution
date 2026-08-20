@@ -28,14 +28,14 @@ High-quality coreference corpora are essential for training both task-specific a
 - **OntoNotes 5.0** (Pradhan et al., 2012): The historical standard English-dominated dataset that framed most of the early neural CR architectural research, though limited by strict licensing guidelines in certain contexts.
 
 ## 1.7 References
-1. Pamay Arslan, T., Erol, E., and Eryiğit, G. (2026). *CorefInst: Leveraging LLMs for Multilingual Coreference Resolution*. Transactions of the Association for Computational Linguistics (TACL).
-2. Barzilay, R., and Lapata, M. (2008). *Modeling local coherence: An entity-based approach*. Computational Linguistics, 34(1):1–34.
-3. Bhattacharjee, S., Haque, R., Wenniger, G., and Way, A. (2020). *Investigating query expansion and coreference resolution in question answering on BERT*. International Conference on Applications of Natural Language to Information Systems.
-4. Bohnet, B., Alberti, C., and Collins, M. (2023). *Coreference resolution through a seq2seq transition-based system*. Transactions of the Association for Computational Linguistics (TACL), 11:212–226.
-5. Brown, T., Mann, B., Ryder, N., et al. (2020). *Language models are few-shot learners*. Advances in Neural Information Processing Systems (NeurIPS), 33:1877–1901.
-6. Chen, S., Gu, B., Qu, J., Li, Z., Liu, A., Zhao, L., and Chen, Z. (2021). *Tackling zero pronoun resolution and non-zero coreference resolution jointly*. Proceedings of the 25th Conference on Computational Natural Language Learning (CoNLL).
-7. Clark, K., and Manning, C. D. (2016). *Improving coreference resolution by learning entity-level distributed representations*. Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics (ACL).
-8. De Marneffe, M. C., Manning, C. D., Nivre, J., and Zeman, D. (2021). *Universal dependencies*. Computational Linguistics, 47(2):255–308.
-9. D’Oosterlinck, K., Bitew, S. K., Papineau, B., et al. (2023). *CAW-coref: Conjunction-aware word-level coreference resolution*. The Sixth Workshop on Computational Models of Reference, Anaphora and Coreference (CRAC).
-10. Gan, Y., Poesio, M., and Yu, J. (2024). *Assessing the capabilities of large language models in coreference: An evaluation*. LREC-COLING 2024.
-11. Joshi, M., Chen, D., Liu, Y., Weld, D. S., Zettlemoyer, L., and Levy, O. (2020). *SpanBERT: Improving pre-training by representing and predicting spans*. Transactions of the Association for Computational Linguistics (TACL), 8:64–77.
+1. Pamay Arslan, T., Erol, E., and Eryiğit, G. (2026). [*CorefInst: Leveraging LLMs for Multilingual Coreference Resolution*](https://arxiv.org/abs/2509.17505). Transactions of the Association for Computational Linguistics (TACL).
+2. Barzilay, R., and Lapata, M. (2008). [*Modeling local coherence: An entity-based approach*](https://aclanthology.org/J08-1001/). Computational Linguistics, 34(1):1–34.
+3. Bhattacharjee, S., Haque, R., Wenniger, G., and Way, A. (2020). [*Investigating query expansion and coreference resolution in question answering on BERT*](https://link.springer.com/chapter/10.1007/978-3-030-51310-8_5). International Conference on Applications of Natural Language to Information Systems.
+4. Bohnet, B., Alberti, C., and Collins, M. (2023). [*Coreference resolution through a seq2seq transition-based system*](https://aclanthology.org/2023.tacl-1.13/). Transactions of the Association for Computational Linguistics (TACL), 11:212–226.
+5. Brown, T., Mann, B., Ryder, N., et al. (2020). [*Language models are few-shot learners*](https://arxiv.org/abs/2005.14165). Advances in Neural Information Processing Systems (NeurIPS), 33:1877–1901.
+6. Chen, S., Gu, B., Qu, J., Li, Z., Liu, A., Zhao, L., and Chen, Z. (2021). [*Tackling zero pronoun resolution and non-zero coreference resolution jointly*](https://aclanthology.org/2021.conll-1.40/). Proceedings of the 25th Conference on Computational Natural Language Learning (CoNLL).
+7. Clark, K., and Manning, C. D. (2016). [*Improving coreference resolution by learning entity-level distributed representations*](https://aclanthology.org/P16-1061/). Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics (ACL).
+8. De Marneffe, M. C., Manning, C. D., Nivre, J., and Zeman, D. (2021). [*Universal dependencies*](https://aclanthology.org/2021.cl-2.11/). Computational Linguistics, 47(2):255–308.
+9. D'Oosterlinck, K., Bitew, S. K., Papineau, B., et al. (2023). [*CAW-coref: Conjunction-aware word-level coreference resolution*](https://aclanthology.org/2023.crac-main.2/). The Sixth Workshop on Computational Models of Reference, Anaphora and Coreference (CRAC).
+10. Gan, Y., Poesio, M., and Yu, J. (2024). [*Assessing the capabilities of large language models in coreference: An evaluation*](https://aclanthology.org/2024.lrec-main.145/). LREC-COLING 2024.
+11. Joshi, M., Chen, D., Liu, Y., Weld, D. S., Zettlemoyer, L., and Levy, O. (2020). [*SpanBERT: Improving pre-training by representing and predicting spans*](https://aclanthology.org/2020.tacl-1.5/). Transactions of the Association for Computational Linguistics (TACL), 8:64–77.
