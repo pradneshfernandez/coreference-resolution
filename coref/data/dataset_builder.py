@@ -26,10 +26,15 @@ Language filter codes
 
 import json
 import os
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-from datasets import Dataset
+if TYPE_CHECKING:                       # `datasets` is only needed to build the
+    from datasets import Dataset        # HF Dataset objects used for training —
+                                        # loading and framing CoNLL data does not
+                                        # require it, so it is imported lazily to
+                                        # keep the CPU-only path dependency-free.
 
+from coref.data.chat_format import build_chat_text
 from coref.data.conll_parser import Document, load_conll_dir
 from coref.data.preprocessor import FrameExample, create_frame_examples
 
@@ -137,6 +142,7 @@ def build_examples(
     documents: List[Document],
     instruction_id: int = 5,
     max_tokens_per_frame: int = 256,
+    min_mentions: int = 1,
 ) -> List[FrameExample]:
     """Convert a list of Documents into FrameExamples."""
     examples: List[FrameExample] = []
@@ -145,6 +151,7 @@ def build_examples(
             doc,
             instruction_id=instruction_id,
             max_tokens_per_frame=max_tokens_per_frame,
+            min_mentions=min_mentions,
         )
         examples.extend(ex)
     return examples
@@ -169,8 +176,10 @@ def _example_to_dict(ex: FrameExample) -> dict:
     }
 
 
-def examples_to_hf_dataset(examples: List[FrameExample]) -> Dataset:
+def examples_to_hf_dataset(examples: List[FrameExample]) -> "Dataset":
     """Create a HuggingFace Dataset from a list of FrameExamples."""
+    from datasets import Dataset
+
     records = [_example_to_dict(ex) for ex in examples]
     return Dataset.from_list(records)
 
@@ -187,7 +196,9 @@ def save_jsonl(examples: List[FrameExample], path: str) -> None:
     print(f"Saved {len(examples)} examples → {path}")
 
 
-def load_jsonl(path: str) -> Dataset:
+def load_jsonl(path: str) -> "Dataset":
+    from datasets import Dataset
+
     records = []
     with open(path, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -213,16 +224,13 @@ def format_for_sft(
     User    = masked_input
     Assistant = output
     """
-    messages = [
-        {"role": "system",    "content": example["instruction"]},
-        {"role": "user",      "content": example["input"]},
-        {"role": "assistant", "content": example["output"]},
-    ]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
+    text = build_chat_text(
+        tokenizer,
+        example["instruction"],
+        example["input"],
+        assistant_content=example["output"],
     )
-    if add_eos and not text.endswith(tokenizer.eos_token):
-        text += tokenizer.eos_token
+    eos = tokenizer.eos_token
+    if add_eos and eos and not text.endswith(eos):
+        text += eos
     return text
